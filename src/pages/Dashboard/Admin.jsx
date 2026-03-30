@@ -1,0 +1,2395 @@
+import React, { useState, useEffect } from "react";
+import axios from "axios";
+import { useNavigate } from "react-router-dom";
+import { 
+  FaUsers, 
+  FaShieldAlt, 
+  FaKey, 
+  FaEdit, 
+  FaTrash, 
+  FaPlus, 
+  FaSave, 
+  FaTimes, 
+  FaSignOutAlt,
+  FaSearch,
+  FaFilter,
+  FaChartBar,
+  FaCog,
+  FaUsersCog,
+  FaEye,
+  FaEyeSlash,
+  FaCheck,
+  FaExclamationTriangle,
+  FaHistory,
+  FaUserShield,
+  FaEnvelope,
+  FaDatabase,
+  FaDownload,
+  FaUpload,
+  FaTrashAlt,
+  FaCloud,
+} from "react-icons/fa";
+import { showSuccess, showDriveExportSuccess, showError, showConfirm, showWarning } from "../../utils/sweetAlert";
+import Settings from "../Settings";
+
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  (import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, "") : "") ||
+  (typeof window !== "undefined" && window.location.origin.includes("localhost:5173")
+    ? "http://localhost:5000"
+    : "")
+).replace(/\/$/, "");
+
+const buildApiUrl = (path) => `${API_BASE_URL}${path}`;
+
+const ACTIVITY_ACTIONS = [
+  "upload",
+  "delete",
+  "archive",
+  "restore",
+  "download",
+  "view",
+  "create",
+  "update",
+  "approve",
+  "reject",
+  "invite",
+  "activate",
+  "deactivate",
+  "assign",
+  "remove",
+  "share",
+  "send_email",
+  "add_remark",
+  "export",
+];
+
+const ACTIVITY_ENTITY_TYPES = [
+  "document",
+  "research",
+  "user",
+  "panel",
+  "feedback",
+  "settings",
+  "email",
+  "schedule",
+  "complianceForm",
+  "progress-dashboard",
+];
+
+const VALID_ADMIN_TABS = ["dashboard", "roles", "permissions", "users", "activity", "backup"];
+
+const Admin = ({ user, setUser }) => {
+  const navigate = useNavigate();
+  const getInitialTab = () => {
+    const saved = localStorage.getItem("adminActiveTab");
+    return VALID_ADMIN_TABS.includes(saved) ? saved : "dashboard";
+  };
+  const [activeTab, setActiveTab] = useState(getInitialTab);
+  const [roles, setRoles] = useState([]);
+  const [permissions, setPermissions] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showRoleModal, setShowRoleModal] = useState(false);
+  const [editingRole, setEditingRole] = useState(null);
+  const [showEditUserModal, setShowEditUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+  const [roleForm, setRoleForm] = useState({
+    name: "",
+    displayName: "",
+    description: "",
+    permissions: [],
+  });
+  const [editUserForm, setEditUserForm] = useState({
+    name: "",
+    email: "",
+    isActive: true,
+  });
+  const [editUserSaving, setEditUserSaving] = useState(false);
+
+  // Search and filter states
+  const [searchTerm, setSearchTerm] = useState("");
+  const [userFilter, setUserFilter] = useState("all");
+  const [roleFilter, setRoleFilter] = useState("all");
+
+  // Stats
+  const [stats, setStats] = useState({
+    totalUsers: 0,
+    activeUsers: 0,
+    totalRoles: 0,
+    activeRoles: 0,
+    totalPermissions: 0
+  });
+
+  // Activity logs
+  const [activityLogs, setActivityLogs] = useState([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityPage, setActivityPage] = useState(1);
+  const [activityMeta, setActivityMeta] = useState({ total: 0, totalPages: 0 });
+  const [exportingPDF, setExportingPDF] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [driveStatus, setDriveStatus] = useState({ connected: false, loading: false });
+  const [activityFilters, setActivityFilters] = useState({
+    search: "",
+    role: "all",
+    action: "all",
+    entityType: "all",
+  });
+
+  // Unified invite form state
+  const [inviteForm, setInviteForm] = useState({ name: "", email: "", role: "dean" });
+  const [inviting, setInviting] = useState(false);
+
+  // Backup management state
+  const [backups, setBackups] = useState([]);
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [creatingBackup, setCreatingBackup] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem("adminActiveTab", activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    fetchRoles();
+    fetchPermissions();
+    fetchUsers();
+    if (activeTab === "backup") {
+      fetchBackups();
+    }
+    if (activeTab === "activity") {
+      fetchDriveStatus();
+    }
+  }, [activeTab]);
+
+  // Listen for Drive connection updates from Settings
+  useEffect(() => {
+    const handleDriveMessage = (event) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === "DRIVE_CONNECT_SUCCESS") {
+        fetchDriveStatus();
+      }
+    };
+    window.addEventListener("message", handleDriveMessage);
+    return () => {
+      window.removeEventListener("message", handleDriveMessage);
+    };
+  }, []);
+
+  const fetchDriveStatus = async () => {
+    setDriveStatus((prev) => ({ ...prev, loading: true }));
+    try {
+      const res = await axios.get(buildApiUrl("/api/google-drive/status"), {
+        headers: { Authorization: `Bearer ${getToken()}` }
+      });
+      setDriveStatus({ ...res.data, loading: false });
+    } catch (error) {
+      console.error("Error checking drive status:", error);
+      setDriveStatus({ connected: false, loading: false });
+    }
+  };
+
+  useEffect(() => {
+    calculateStats();
+  }, [roles, users, permissions]);
+
+  const getToken = () => localStorage.getItem("token");
+
+  const calculateStats = () => {
+    setStats({
+      totalUsers: users.length,
+      activeUsers: users.filter(u => u.isActive).length,
+      totalRoles: roles.length,
+      activeRoles: roles.filter(r => r.isActive).length,
+      totalPermissions: permissions.length
+    });
+  };
+
+  const fetchRoles = async () => {
+    try {
+      setLoading(true);
+      const res = await axios.get(buildApiUrl("/api/admin/roles"), {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      setRoles(res.data);
+    } catch (error) {
+      console.error("Error fetching roles:", error);
+      showError("Error", "Failed to fetch roles");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPermissions = async () => {
+    try {
+      const res = await axios.get(buildApiUrl("/api/admin/permissions"), {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      setPermissions(res.data);
+    } catch (error) {
+      console.error("Error fetching permissions:", error);
+      showError("Error", "Failed to fetch permissions");
+    }
+  };
+
+  const fetchUsers = async () => {
+    try {
+      const res = await axios.get(buildApiUrl("/api/admin/users"), {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      setUsers(res.data);
+    } catch (error) {
+      console.error("Error fetching users:", error);
+      showError("Error", "Failed to fetch users");
+    }
+  };
+
+  const roleEndpointMap = {
+    dean: "/api/admin/invite-dean",
+    "faculty adviser": "/api/admin/invite-faculty",
+    "program head": "/api/admin/invite-program-head",
+  };
+
+  const roleLabelMap = {
+    dean: "Dean",
+    "faculty adviser": "Faculty Adviser",
+    "program head": "Program Head",
+  };
+
+  const handleInvite = async (e) => {
+    e.preventDefault();
+    if (!inviteForm.name.trim() || !inviteForm.email.trim()) {
+      showError("Validation Error", "Please enter both name and email.");
+      return;
+    }
+    
+    // TEMPORARY: Validate email format (allow both institutional and gmail for testing)
+    const emailPattern = /^[a-zA-Z0-9._-]+@(buksu\.edu\.ph|gmail\.com)$/i;
+    if (!emailPattern.test(inviteForm.email)) {
+      showError('Invalid Email', 'Please use a valid @buksu.edu.ph or @gmail.com email address (for testing).');
+      return;
+    }
+    
+    const roleLabel = roleLabelMap[inviteForm.role];
+    const confirmed = await showConfirm(
+      `Invite ${roleLabel}`,
+      `Send an invitation to "${inviteForm.name}" at ${inviteForm.email} as ${roleLabel}?`,
+      "Send Invitation",
+      "Cancel"
+    );
+    if (!confirmed.isConfirmed) return;
+    try {
+      setInviting(true);
+      await axios.post(
+        buildApiUrl(roleEndpointMap[inviteForm.role]),
+        { name: inviteForm.name, email: inviteForm.email },
+        { headers: { Authorization: `Bearer ${getToken()}` } }
+      );
+      await showSuccess("Invitation Sent", `${roleLabel} invitation sent to ${inviteForm.email}.`);
+      setInviteForm({ name: "", email: "", role: inviteForm.role });
+      await fetchUsers();
+    } catch (error) {
+      showError("Error", error.response?.data?.message || `Error sending ${roleLabel} invitation`);
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleCreateRole = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await axios.post(
+        buildApiUrl("/api/admin/roles"),
+        roleForm,
+        {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }
+      );
+      await fetchRoles();
+      setShowRoleModal(false);
+      setRoleForm({ name: "", displayName: "", description: "", permissions: [] });
+      await showSuccess("Success", "Role created successfully!");
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Error creating role");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRoleFormSubmit = (e) => {
+    if (editingRole) {
+      e.preventDefault();
+      handleUpdateRole(editingRole._id, roleForm);
+      setShowRoleModal(false);
+    } else {
+      handleCreateRole(e);
+    }
+  };
+
+  const handleUpdateRole = async (roleId, updates, customMessage = null) => {
+    try {
+      const role = roles.find((r) => r._id === roleId);
+      const roleName = role?.displayName || "Role";
+
+      await axios.put(
+        buildApiUrl(`/api/admin/roles/${roleId}`),
+        updates,
+        {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }
+      );
+      await fetchRoles();
+      
+      // Show custom message if provided, otherwise show appropriate message based on update
+      if (customMessage) {
+        await showSuccess(customMessage.title, customMessage.text);
+      } else if (updates.isActive !== undefined) {
+        const action = updates.isActive ? "enabled" : "disabled";
+        await showSuccess(
+          "Role Status Updated",
+          `The "${roleName}" role has been ${action}. ${updates.isActive ? "Users with this role can now access the system." : "Users with this role will no longer be able to access the system."}`
+        );
+      } else {
+        await showSuccess("Success", "Role updated successfully!");
+      }
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Error updating role");
+    }
+  };
+
+  const handleDeleteRole = async (roleId, roleName) => {
+    const result = await showConfirm(
+      "Delete Role",
+      `Are you sure you want to delete the role "${roleName}"?`,
+      "Delete",
+      "Cancel"
+    );
+    if (!result.isConfirmed) return;
+
+    try {
+      await axios.delete(buildApiUrl(`/api/admin/roles/${roleId}`), {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      await fetchRoles();
+      await showSuccess("Success", "Role deleted successfully!");
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Error deleting role");
+    }
+  };
+
+  const handleTogglePermission = async (roleId, permissionId) => {
+    const role = roles.find((r) => r._id === roleId);
+    if (!role) return;
+
+    const permission = permissions.find((p) => p._id === permissionId);
+    if (!permission) return;
+
+    const hasPermission = role.permissions.some((p) => p._id === permissionId);
+    const action = hasPermission ? "disabled" : "enabled";
+    const permissionName = permission.name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
+    const roleName = role.displayName;
+
+    const newPermissions = hasPermission
+      ? role.permissions.filter((p) => p._id !== permissionId).map((p) => p._id)
+      : [...role.permissions.map((p) => p._id), permissionId];
+
+    // Optimistic update: Update UI immediately for instant feedback
+    setRoles(prevRoles => prevRoles.map(r => {
+      if (r._id === roleId) {
+        const updatedPermissions = hasPermission
+          ? r.permissions.filter(p => p._id !== permissionId)
+          : [...r.permissions, permission];
+        return { ...r, permissions: updatedPermissions };
+      }
+      return r;
+    }));
+
+    try {
+      await axios.put(
+        buildApiUrl(`/api/admin/roles/${roleId}`),
+        { permissions: newPermissions },
+        {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }
+      );
+      
+      // Show specific message about the permission change
+      const message = hasPermission 
+        ? `Permission "${permissionName}" has been disabled for the "${roleName}" role. Users with this role will no longer be able to access this feature.`
+        : `Permission "${permissionName}" has been enabled for the "${roleName}" role. Users with this role can now access this feature.`;
+      
+      await showSuccess(
+        hasPermission ? "Permission Disabled" : "Permission Enabled",
+        message
+      );
+    } catch (error) {
+      // If update fails, revert the optimistic update by refetching
+      await fetchRoles();
+      showError("Error", error.response?.data?.message || "Failed to update permission");
+    }
+  };
+
+  const handleUpdateUserRole = async (userId, newRole) => {
+    try {
+      // Find the user to get their current version
+      const user = users.find(u => u._id === userId);
+      if (!user) {
+        showError("Error", "User not found");
+        return;
+      }
+
+      // Prevent changing student roles from the UI as well
+      if (user.role === "graduate student") {
+        showWarning(
+          "Action Not Allowed",
+          "Student roles cannot be changed. Graduate student accounts must remain as students."
+        );
+        return;
+      }
+
+      const version = user.version || 0;
+
+      const { data } = await axios.put(
+        buildApiUrl(`/api/admin/users/${userId}/role`),
+        { role: newRole, version },
+        {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }
+      );
+      // Optimistically update local state so the row reflects the change without a full refresh
+      setUsers(prev =>
+        prev.map(u =>
+          u._id === userId
+            ? {
+                ...u,
+                role: data?.role || newRole,
+                version: data?.version ?? u.version,
+              }
+            : u
+        )
+      );
+      await showSuccess("Success", "User role updated successfully!");
+    } catch (error) {
+      // Handle version mismatch (409 Conflict)
+      if (error.response?.status === 409) {
+        showError("Version Conflict", error.response.data?.message || "This user was updated by another user. Please reload the page to see the latest changes and try again.");
+        return;
+      }
+      showError("Error", error.response?.data?.message || "Error updating user role");
+    }
+  };
+
+  const handleDeleteUser = async (userId, userName, userRole) => {
+    // Prevent deleting admin users
+    if (userRole === "admin") {
+      await showError("Cannot Delete Admin", "Admin users cannot be deleted. Please reassign the role first if needed.");
+      return;
+    }
+
+    const result = await showConfirm(
+      "Delete User",
+      `Are you sure you want to permanently delete "${userName}"? This action cannot be undone.`,
+      "Delete",
+      "Cancel"
+    );
+    
+    if (!result.isConfirmed) return;
+
+    try {
+      await axios.delete(buildApiUrl(`/api/admin/users/${userId}`), {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      await fetchUsers(); // This will automatically update stats via useEffect
+      await showSuccess("Success", `User "${userName}" has been removed from the system.`);
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Error deleting user");
+    }
+  };
+
+  const closeEditUserModal = () => {
+    setShowEditUserModal(false);
+    setEditingUser(null);
+    setEditUserForm({ name: "", email: "", isActive: true });
+    setEditUserSaving(false);
+  };
+
+  const openEditUserModal = (user) => {
+    setEditingUser(user);
+    setEditUserForm({
+      name: user?.name || "",
+      email: user?.email || "",
+      isActive: !!user?.isActive,
+    });
+    setShowEditUserModal(true);
+  };
+
+  const validateEmailForRole = (email, role) => {
+    if (!email) return "Email cannot be empty.";
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return "Invalid email format.";
+    }
+    const emailDomain = email.split("@")[1];
+    const isStudent = role === "graduate student";
+    if (isStudent && emailDomain !== "student.buksu.edu.ph" && emailDomain !== "gmail.com") {
+      return "Graduate students must use @student.buksu.edu.ph or @gmail.com email address (for testing).";
+    }
+    if (!isStudent && emailDomain !== "buksu.edu.ph" && emailDomain !== "gmail.com") {
+      return "Faculty, Dean, and Program Head must use @buksu.edu.ph or @gmail.com email address (for testing).";
+    }
+    return null;
+  };
+
+  const handleEditUserSubmit = async (e) => {
+    e.preventDefault();
+    if (!editingUser) return;
+
+    const trimmedName = (editUserForm.name || "").trim();
+    const normalizedEmail = (editUserForm.email || "").toLowerCase().trim();
+
+    if (!trimmedName) {
+      showWarning("Validation Error", "Name cannot be empty.");
+      return;
+    }
+
+    const emailValidationMessage = validateEmailForRole(normalizedEmail, editingUser.role);
+    if (emailValidationMessage) {
+      showWarning("Validation Error", emailValidationMessage);
+      return;
+    }
+
+    const payload = {
+      version: editingUser.version || 0,
+      name: trimmedName,
+      email: normalizedEmail,
+      isActive: editUserForm.isActive,
+    };
+
+    setEditUserSaving(true);
+    try {
+      const { data } = await axios.put(
+        buildApiUrl(`/api/admin/users/${editingUser._id}`),
+        payload,
+        {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }
+      );
+
+      // Update local users list with latest data
+      if (data?.user) {
+        setUsers(prev =>
+          prev.map(u =>
+            u._id === data.user.id
+              ? {
+                  ...u,
+                  name: data.user.name,
+                  email: data.user.email,
+                  isActive: data.user.isActive,
+                  version: data.user.version ?? u.version,
+                }
+              : u
+          )
+        );
+      }
+
+      await showSuccess("Success", "User details updated successfully!");
+      closeEditUserModal();
+    } catch (error) {
+      if (error.response?.status === 409) {
+        showError(
+          "Version Conflict",
+          error.response.data?.message ||
+            "This user was updated by another user. Please reload the page to see the latest changes and try again."
+        );
+      } else {
+        showError("Error", error.response?.data?.message || "Failed to update user details.");
+      }
+    } finally {
+      setEditUserSaving(false);
+    }
+  };
+
+  const handleToggleUserActivation = async (user) => {
+    const nextStatus = !user.isActive;
+    const action = nextStatus ? "activate" : "deactivate";
+    const result = await showConfirm(
+      `${nextStatus ? "Activate" : "Deactivate"} User`,
+      `Are you sure you want to ${action} "${user.name}"?`,
+      nextStatus ? "Activate" : "Deactivate",
+      "Cancel"
+    );
+    if (!result.isConfirmed) return;
+
+    try {
+      const { data } = await axios.put(
+        buildApiUrl(`/api/admin/users/${user._id}`),
+        { isActive: nextStatus, version: user.version || 0 },
+        {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        }
+      );
+      // Update local users list so status reflects the change without a full refresh
+      if (data?.user) {
+        setUsers(prev =>
+          prev.map(u =>
+            u._id === data.user.id
+              ? {
+                  ...u,
+                  isActive: data.user.isActive,
+                  version: data.user.version ?? u.version,
+                }
+              : u
+          )
+        );
+      } else {
+        // Fallback if backend didn’t send a user payload
+        setUsers(prev =>
+          prev.map(u =>
+            u._id === user._id
+              ? { ...u, isActive: nextStatus, version: (u.version || 0) + 1 }
+              : u
+          )
+        );
+      }
+      await showSuccess("Success", `User ${nextStatus ? "activated" : "deactivated"} successfully!`);
+    } catch (error) {
+      if (error.response?.status === 409) {
+        showError(
+          "Version Conflict",
+          error.response.data?.message ||
+            "This user was updated by another user. Please reload the page to see the latest changes and try again."
+        );
+        return;
+      }
+      showError("Error", error.response?.data?.message || `Failed to ${action} user.`);
+    }
+  };
+
+  const handleOpenSettings = () => {
+    setShowSettings(true);
+  };
+
+  const handleCloseSettings = () => {
+    setShowSettings(false);
+    // Refresh drive status when settings close
+    if (activeTab === "activity") {
+      fetchDriveStatus();
+    }
+  };
+
+  const handleLogout = async () => {
+    const result = await showConfirm("Log Out", "Are you sure you want to log out?");
+    if (result.isConfirmed) {
+      localStorage.removeItem("token");
+      sessionStorage.removeItem("selectedRole");
+      setUser(null);
+      navigate("/login", {
+        state: { message: "You have been logged out successfully." },
+        replace: true,
+      });
+    }
+  };
+
+  // Backup management functions
+  const fetchBackups = async () => {
+    setBackupLoading(true);
+    try {
+      const res = await axios.get(buildApiUrl("/api/backup/list"), {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      setBackups(res.data.backups || []);
+    } catch (error) {
+      console.error("Error fetching backups:", error);
+      showError("Error", error.response?.data?.message || "Failed to load backups");
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    const result = await showConfirm(
+      "Create Backup",
+      "This will create a full backup of the database and uploads. Continue?",
+      "Create Backup",
+      "Cancel"
+    );
+    if (!result.isConfirmed) return;
+
+    setCreatingBackup(true);
+    try {
+      const createRes = await axios.post(buildApiUrl("/api/backup/create"), {}, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+
+      const metadataPath = createRes.data?.backup?.metadataPath || "";
+      const metadataFile = metadataPath.split(/[/\\]/).pop();
+
+      let downloadFailed = false;
+      if (metadataFile) {
+        try {
+          await downloadFullBackupByMetadataFile(metadataFile);
+        } catch (downloadError) {
+          downloadFailed = true;
+          console.error("Backup created but auto-download failed:", downloadError);
+        }
+      }
+
+      if (downloadFailed) {
+        await showWarning(
+          "Backup Created",
+          "Backup was created successfully, but auto-download failed. Use the Download button in the backups list."
+        );
+      } else {
+        await showSuccess("Success", "Backup created and downloaded successfully!");
+      }
+      await fetchBackups();
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Failed to create backup");
+    } finally {
+      setCreatingBackup(false);
+    }
+  };
+
+  const downloadFullBackupByMetadataFile = async (metadataFile) => {
+    const downloadRes = await axios.get(
+      buildApiUrl(`/api/backup/download?metadataFile=${encodeURIComponent(metadataFile)}`),
+      {
+        headers: { Authorization: `Bearer ${getToken()}` },
+        responseType: "blob",
+      }
+    );
+
+    const contentDisposition = downloadRes.headers?.["content-disposition"] || "";
+    const fileNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+    const downloadFileName = fileNameMatch?.[1] || `full-backup-${Date.now()}.zip`;
+
+    const blob = new Blob([downloadRes.data], { type: "application/zip" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", downloadFileName);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const handleCleanBackups = async () => {
+    const result = await showConfirm(
+      "Clean Old Backups",
+      "This will delete old backups beyond the retention limit. Continue?",
+      "Clean",
+      "Cancel"
+    );
+    if (!result.isConfirmed) return;
+
+    try {
+      const res = await axios.post(buildApiUrl("/api/backup/clean"), {}, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      const deletedCount = Number(res.data.deleted || 0);
+      const retentionDays = Number(res.data.retentionDays || 30);
+      const failedCount = Array.isArray(res.data.failed) ? res.data.failed.length : 0;
+
+      if (deletedCount > 0) {
+        await showSuccess("Success", `Deleted ${deletedCount} backup(s) older than ${retentionDays} days.`);
+      } else if (failedCount > 0) {
+        await showWarning("Cleanup Incomplete", "Old backups were found, but they could not be deleted. Please check server file permissions.");
+      } else {
+        await showWarning("No Old Backups", `No backups older than ${retentionDays} days were found.`);
+      }
+
+      await fetchBackups();
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Failed to clean backups");
+    }
+  };
+
+  const handleDeleteAllBackups = async () => {
+    const result = await showConfirm(
+      "Delete All Backups",
+      "This will permanently delete all managed backup files and folders. Continue?",
+      "Delete All",
+      "Cancel"
+    );
+    if (!result.isConfirmed) return;
+
+    try {
+      const res = await axios.post(buildApiUrl("/api/backup/clean-all"), {}, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+
+      const deletedCount = Number(res.data.deleted || 0);
+      const failedCount = Array.isArray(res.data.failed) ? res.data.failed.length : 0;
+
+      if (deletedCount > 0) {
+        await showSuccess("Success", `Deleted ${deletedCount} backup(s).`);
+      } else if (failedCount > 0) {
+        await showWarning("Delete Incomplete", "Backups were found, but some could not be deleted. Please check file permissions.");
+      } else {
+        await showWarning("No Backups Found", "No managed backups were found to delete.");
+      }
+
+      await fetchBackups();
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Failed to delete all backups");
+    }
+  };
+
+  const formatBackupDate = (timestamp) => {
+    if (!timestamp) return "N/A";
+    const date = new Date(timestamp);
+    return date.toLocaleString();
+  };
+
+  const formatFileSize = (bytes) => {
+    if (!bytes) return "N/A";
+    const sizes = ["Bytes", "KB", "MB", "GB"];
+    if (bytes === 0) return "0 Bytes";
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + " " + sizes[i];
+  };
+
+  const permissionsByModule = permissions.reduce((acc, perm) => {
+    if (!acc[perm.module]) acc[perm.module] = [];
+    acc[perm.module].push(perm);
+    return acc;
+  }, {});
+
+  // Filter functions
+  const filteredUsers = users.filter(user => {
+    const matchesSearch = user.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         user.email.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesFilter = userFilter === "all" || 
+                         (userFilter === "active" && user.isActive) ||
+                         (userFilter === "inactive" && !user.isActive);
+    return matchesSearch && matchesFilter;
+  });
+
+  const filteredRoles = roles.filter(role => {
+    const matchesSearch = role.displayName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         role.description.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesFilter = roleFilter === "all" || 
+                         (roleFilter === "active" && role.isActive) ||
+                         (roleFilter === "inactive" && !role.isActive) ||
+                         (roleFilter === "system" && role.isSystem);
+    return matchesSearch && matchesFilter;
+  });
+
+  const effectiveActivityTotalPages = Math.max(activityMeta.totalPages || 0, 1);
+
+  const formatActivityTimestamp = (value) => {
+    try {
+      return new Date(value).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+    } catch (error) {
+      return value;
+    }
+  };
+
+  const handleActivityFilterChange = (key, value) => {
+    setActivityPage(1);
+    setActivityFilters((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  };
+
+  const resetActivityFilters = () => {
+    setActivityFilters({
+      search: "",
+      role: "all",
+      action: "all",
+      entityType: "all",
+    });
+    setActivityPage(1);
+  };
+
+  const handleExportActivityLogsPDF = async (saveToDrive = false) => {
+    setExportingPDF(true);
+    setShowExportModal(false);
+    try {
+      if (saveToDrive) {
+        // Save to Google Drive - send filters in request body
+        const response = await axios.post(
+          buildApiUrl("/api/admin/activity-logs/export/pdf"),
+          {
+            search: activityFilters.search.trim() || "",
+            role: activityFilters.role || "all",
+            action: activityFilters.action || "all",
+            entityType: activityFilters.entityType || "all",
+            startDate: activityFilters.startDate || null,
+            endDate: activityFilters.dateRange?.endDate || null,
+            saveToDrive: true,
+          },
+          {
+            headers: { Authorization: `Bearer ${getToken()}` },
+          }
+        );
+
+        // Build success message with link if available
+        await showDriveExportSuccess(
+          "Success",
+          response.data.message || "Activity logs exported as PDF and saved to your Google Drive Reports folder!",
+          {
+            driveFileLink: response.data.driveFile?.webViewLink,
+            driveFolderLink: response.data.driveFolderLink,
+          }
+        );
+        
+        // Refresh drive status
+        await fetchDriveStatus();
+      } else {
+        // Download to computer - use GET with query params
+        const params = new URLSearchParams();
+
+        if (activityFilters.search.trim()) {
+          params.append("search", activityFilters.search.trim());
+        }
+        if (activityFilters.role !== "all") {
+          params.append("role", activityFilters.role);
+        }
+        if (activityFilters.action !== "all") {
+          params.append("action", activityFilters.action);
+        }
+        if (activityFilters.entityType !== "all") {
+          params.append("entityType", activityFilters.entityType);
+        }
+
+        const queryString = params.toString();
+        const apiUrl = queryString
+          ? `/api/admin/activity-logs/export/pdf?${queryString}`
+          : `/api/admin/activity-logs/export/pdf`;
+
+        const response = await axios.get(buildApiUrl(apiUrl), {
+          headers: { Authorization: `Bearer ${getToken()}` },
+          responseType: "blob",
+        });
+
+        // Create blob link to download
+        const url = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement("a");
+        link.href = url;
+        link.setAttribute(
+          "download",
+          `activity-logs-${new Date().toISOString().split("T")[0]}.pdf`
+        );
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+
+        await showSuccess("Success", "Activity logs exported as PDF successfully!");
+      }
+    } catch (error) {
+      console.error("Error exporting activity logs PDF:", error);
+      showError("Error", error.response?.data?.message || "Failed to export activity logs");
+    } finally {
+      setExportingPDF(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab !== "activity") return;
+
+    const fetchActivityLogs = async () => {
+      setActivityLoading(true);
+      try {
+        const params = new URLSearchParams({
+          page: activityPage,
+          limit: 15,
+        });
+
+        if (activityFilters.search.trim()) {
+          params.append("search", activityFilters.search.trim());
+        }
+        if (activityFilters.role !== "all") {
+          params.append("role", activityFilters.role);
+        }
+        if (activityFilters.action !== "all") {
+          params.append("action", activityFilters.action);
+        }
+        if (activityFilters.entityType !== "all") {
+          params.append("entityType", activityFilters.entityType);
+        }
+
+        const res = await axios.get(
+          buildApiUrl(`/api/admin/activity-logs?${params.toString()}`),
+          {
+            headers: { Authorization: `Bearer ${getToken()}` },
+          }
+        );
+
+        setActivityLogs(res.data.logs || []);
+        setActivityMeta({
+          total: res.data.total || 0,
+          totalPages: res.data.totalPages || 0,
+        });
+      } catch (error) {
+        console.error("Error fetching activity logs:", error);
+        showError("Error", error.response?.data?.message || "Failed to load activity logs");
+      } finally {
+        setActivityLoading(false);
+      }
+    };
+
+    fetchActivityLogs();
+  }, [activeTab, activityPage, activityFilters]);
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      {/* Header */}
+        <div className="bg-white shadow-lg border-b border-gray-200">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center space-x-4">
+              <div className="bg-gradient-to-r from-[#7C1D23] to-[#5a1519] p-3 rounded-lg shadow-md">
+                <FaUsersCog className="text-white text-2xl" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold text-gray-900 bg-gradient-to-r from-[#7C1D23] to-[#5a1519] bg-clip-text text-transparent">
+                  Admin Dashboard
+                </h1>
+                <p className="text-sm text-gray-600 mt-1">
+                  Comprehensive Role-Based Access Control Management System
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-6">
+              <div className="text-right">
+                <p className="text-sm text-gray-500">Welcome back,</p>
+                <p className="font-semibold text-gray-900">{user?.name}</p>
+              </div>
+              <div className="h-8 w-px bg-gray-300"></div>
+              <button
+                onClick={showSettings ? handleCloseSettings : handleOpenSettings}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg ${
+                  showSettings
+                    ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white"
+                    : "bg-gradient-to-r from-gray-500 to-gray-600 text-white hover:from-gray-600 hover:to-gray-700"
+                }`}
+              >
+                <FaCog />
+                <span>{showSettings ? "Close Settings" : "Settings"}</span>
+              </button>
+              <button
+                onClick={handleLogout}
+                className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 shadow-md hover:shadow-lg"
+              >
+                <FaSignOutAlt />
+                <span>Logout</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Settings Content */}
+        {showSettings ? (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <Settings
+              user={user}
+              setUser={setUser}
+              embedded={true}
+              onClose={handleCloseSettings}
+            />
+          </div>
+        ) : (
+          <>
+            {/* Tabs */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-8">
+          <nav className="flex space-x-1 p-2">
+            <button
+              onClick={() => setActiveTab("dashboard")}
+              className={`py-3 px-6 rounded-lg font-medium text-sm flex items-center space-x-3 transition-all duration-200 ${
+                activeTab === "dashboard"
+                  ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white shadow-md"
+                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+              }`}
+            >
+              <FaChartBar />
+              <span>Dashboard</span>
+            </button>
+            <button
+              onClick={() => setActiveTab("roles")}
+              className={`py-3 px-6 rounded-lg font-medium text-sm flex items-center space-x-3 transition-all duration-200 ${
+                activeTab === "roles"
+                  ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white shadow-md"
+                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+              }`}
+            >
+              <FaShieldAlt />
+              <span>Roles</span>
+            </button>
+            <button
+              onClick={() => setActiveTab("permissions")}
+              className={`py-3 px-6 rounded-lg font-medium text-sm flex items-center space-x-3 transition-all duration-200 ${
+                activeTab === "permissions"
+                  ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white shadow-md"
+                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+              }`}
+            >
+              <FaKey />
+              <span>Permissions</span>
+            </button>
+            <button
+              onClick={() => setActiveTab("users")}
+              className={`py-3 px-6 rounded-lg font-medium text-sm flex items-center space-x-3 transition-all duration-200 ${
+                activeTab === "users"
+                  ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white shadow-md"
+                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+              }`}
+            >
+              <FaUsers />
+              <span>Users</span>
+            </button>
+            <button
+              onClick={() => setActiveTab("activity")}
+              className={`py-3 px-6 rounded-lg font-medium text-sm flex items-center space-x-3 transition-all duration-200 ${
+                activeTab === "activity"
+                  ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white shadow-md"
+                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+              }`}
+            >
+              <FaHistory />
+              <span>Activity Logs</span>
+            </button>
+            <button
+              onClick={() => setActiveTab("backup")}
+              className={`py-3 px-6 rounded-lg font-medium text-sm flex items-center space-x-3 transition-all duration-200 ${
+                activeTab === "backup"
+                  ? "bg-gradient-to-r from-[#7C1D23] to-[#5a1519] text-white shadow-md"
+                  : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+              }`}
+            >
+              <FaDatabase />
+              <span>Backup & Recovery</span>
+            </button>
+          </nav>
+        </div>
+
+        {/* Dashboard Tab */}
+        {activeTab === "dashboard" && (
+          <div>
+            <div className="mb-8">
+              <h2 className="text-2xl font-bold text-gray-900 mb-6">System Overview</h2>
+              
+              {/* Stats Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
+                <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow duration-300">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Total Users</p>
+                      <p className="text-3xl font-bold text-gray-900">{stats.totalUsers}</p>
+                    </div>
+                    <div className="bg-[#FDE8EA] p-3 rounded-full">
+                      <FaUsers className="text-[#7C1D23] text-xl" />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow duration-300">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Active Users</p>
+                      <p className="text-3xl font-bold text-green-600">{stats.activeUsers}</p>
+                    </div>
+                    <div className="bg-green-100 p-3 rounded-full">
+                      <FaCheck className="text-green-600 text-xl" />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow duration-300">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Total Roles</p>
+                      <p className="text-3xl font-bold text-[#7C1D23]">{stats.totalRoles}</p>
+                    </div>
+                    <div className="bg-[#FDE8EA] p-3 rounded-full">
+                      <FaShieldAlt className="text-[#7C1D23] text-xl" />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow duration-300">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Active Roles</p>
+                      <p className="text-3xl font-bold text-[#7C1D23]">{stats.activeRoles}</p>
+                    </div>
+                    <div className="bg-[#FDE8EA] p-3 rounded-full">
+                      <FaEye className="text-[#7C1D23] text-xl" />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow duration-300">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-600 mb-1">Active Permissions</p>
+                      <p className="text-3xl font-bold text-[#7C1D23]">{stats.totalPermissions}</p>
+                    </div>
+                    <div className="bg-[#FDE8EA] p-3 rounded-full">
+                      <FaKey className="text-[#7C1D23] text-xl" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 mb-8">
+                  <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                    <FaExclamationTriangle className="mr-2 text-yellow-600" />
+                    System Status
+                  </h3>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
+                      <div className="flex items-center">
+                        <div className="w-3 h-3 bg-green-500 rounded-full mr-3"></div>
+                        <span className="text-sm text-green-800">All systems operational</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between p-3 bg-[#FDE8EA] border border-[#F5C6CC] rounded-lg">
+                      <div className="flex items-center">
+                        <div className="w-3 h-3 bg-[#7C1D23] rounded-full mr-3"></div>
+                        <span className="text-sm text-[#7C1D23]">RBAC system active</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                      <div className="flex items-center">
+                        <div className="w-3 h-3 bg-gray-500 rounded-full mr-3"></div>
+                        <span className="text-sm text-gray-800">Last updated: {new Date().toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                  </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Roles Tab */}
+        {activeTab === "roles" && (
+          <div>
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-6 gap-4">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Role Management</h2>
+                <p className="text-gray-600 mt-1">Manage system roles and their permissions</p>
+              </div>
+            </div>
+
+            {/* Search and Filter */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+              <div className="flex flex-col lg:flex-row gap-4">
+                <div className="flex-1">
+                  <div className="relative">
+                    <FaSearch className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      placeholder="Search roles by name or description..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                    />
+                  </div>
+                </div>
+                <div className="lg:w-48">
+                  <select
+                    value={roleFilter}
+                    onChange={(e) => setRoleFilter(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                  >
+                    <option value="all">All Roles</option>
+                    <option value="active">Active Only</option>
+                    <option value="inactive">Inactive Only</option>
+                    <option value="system">System Roles</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {loading ? (
+              <div className="flex justify-center items-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#7C1D23]"></div>
+                <span className="ml-3 text-gray-600">Loading roles...</span>
+              </div>
+            ) : (
+              <div className="grid gap-6">
+                {filteredRoles.length === 0 ? (
+                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+                    <FaShieldAlt className="mx-auto text-gray-400 text-4xl mb-4" />
+                    <p className="text-gray-500 text-lg">No roles found matching your criteria</p>
+                    <p className="text-gray-400 text-sm mt-2">Try adjusting your search or filter settings</p>
+                  </div>
+                ) : (
+                  filteredRoles.map((role) => (
+                    <div key={role._id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow duration-200">
+                      <div className="flex justify-between items-start mb-4">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-3 mb-2">
+                            <div className={`w-3 h-3 rounded-full ${role.isActive ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            <h3 className="text-lg font-semibold text-gray-900">{role.displayName}</h3>
+                            {role.isSystem && (
+                              <span className="px-2 py-1 bg-[#FDE8EA] text-[#7C1D23] text-xs font-medium rounded-full">
+                                System
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-gray-600 mb-3 leading-relaxed">{role.description}</p>
+                      <div className="flex flex-col lg:flex-row lg:items-center lg:space-x-6 space-y-3 lg:space-y-0 text-sm">
+                        <div className="flex items-center space-x-2">
+                          <FaKey className="text-[#7C1D23]" />
+                          <span className="text-gray-600">
+                            <span className="font-medium text-gray-900">{role.permissions?.length || 0}</span> permissions
+                          </span>
+                        </div>
+                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          role.isActive 
+                            ? 'bg-green-100 text-green-800 border border-green-200' 
+                            : 'bg-red-100 text-red-800 border border-red-200'
+                        }`}>
+                          {role.isActive ? 'Active' : 'Inactive'}
+                        </span>
+                        <button
+                          onClick={() => {
+                            setEditingRole(role);
+                            setRoleForm({
+                              name: role.name,
+                              displayName: role.displayName,
+                              description: role.description || "",
+                              permissions: role.permissions?.map((p) => p._id) || [],
+                            });
+                            setShowRoleModal(true);
+                          }}
+                          className="inline-flex items-center px-3 py-1.5 border border-gray-300 rounded-lg text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+                        >
+                          <FaEdit className="mr-2" />
+                          Edit Details
+                        </button>
+                      </div>
+                        </div>
+                        <div className="flex items-center space-x-4">
+                          <label className="flex items-center cursor-pointer bg-gray-50 rounded-lg px-3 py-2 hover:bg-gray-100 transition-colors">
+                            <input
+                              type="checkbox"
+                              checked={role.isActive}
+                              onChange={(e) => {
+                                handleUpdateRole(role._id, { isActive: e.target.checked });
+                              }}
+                              disabled={role.isSystem}
+                              className="mr-2 w-4 h-4 text-[#7C1D23] focus:ring-[#7C1D23] rounded"
+                            />
+                            <span className="text-sm font-medium text-gray-700">Active</span>
+                          </label>
+                          {!role.isSystem && (
+                            <button
+                              onClick={() => handleDeleteRole(role._id, role.displayName)}
+                              className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors duration-200 border border-red-200 hover:border-red-300"
+                              title="Delete role"
+                            >
+                              <FaTrash />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* All permissions as toggles — ON = assigned, OFF = not assigned */}
+                      <div className="mt-4">
+                        <h4 className="text-sm font-medium mb-3 text-gray-700">
+                          Permissions
+                          <span className="ml-2 px-2 py-0.5 bg-[#FDE8EA] text-[#7C1D23] text-xs font-semibold rounded-full">
+                            {role.permissions?.length || 0} / {permissions.filter(p => p.isActive).length}
+                          </span>
+                        </h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                          {permissions.filter(p => p.isActive).map((permission) => {
+                            const isOn = role.permissions?.some(p => p._id === permission._id);
+                            const isDisabled = role.isSystem && role.name === "admin";
+                            return (
+                              <div
+                                key={permission._id}
+                                className={`flex items-center justify-between px-3 py-2 rounded-lg border transition-all duration-200 ${
+                                  isOn ? "bg-[#FDECEC] border-[#E0A6AC]" : "bg-gray-50 border-gray-200"
+                                }`}
+                              >
+                                <span className={`text-xs capitalize ${isOn ? "text-[#7C1D23] font-medium" : "text-gray-400"}`}>
+                                  {permission.name.replace(/_/g, " ")}
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={isDisabled}
+                                  onClick={() => handleTogglePermission(role._id, permission._id)}
+                                  title={isOn ? "Turn off to remove" : "Turn on to assign"}
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                    isDisabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                                  } ${isOn ? "bg-[#7C1D23]" : "bg-gray-300"}`}
+                                >
+                                  <span
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                      isOn ? "translate-x-4" : "translate-x-0"
+                                    }`}
+                                  />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Permissions Tab */}
+        {activeTab === "permissions" && (
+          <div>
+            <div className="mb-6">
+              <h2 className="text-2xl font-bold text-gray-900">System Permissions</h2>
+              <p className="text-gray-600 mt-1">Overview of all permissions organized by module</p>
+            </div>
+            
+            <div className="grid gap-6">
+              {Object.entries(permissionsByModule).map(([module, perms]) => (
+                <div key={module} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                  <div className="bg-gradient-to-r from-[#FDE8EA] to-[#F8F1EC] px-6 py-4 border-b border-gray-200">
+                    <div className="flex items-center space-x-3">
+                      <div className="bg-gradient-to-r from-[#7C1D23] to-[#5a1519] p-2 rounded-lg">
+                        <FaKey className="text-white text-lg" />
+                      </div>
+                      <h3 className="font-semibold text-xl capitalize bg-gradient-to-r from-[#7C1D23] to-[#5a1519] bg-clip-text text-transparent">
+                        {module} Module
+                      </h3>
+                      <span className="bg-[#FDE8EA] text-[#7C1D23] px-2 py-1 rounded-full text-sm font-medium">
+                        {perms.length} permissions
+                      </span>
+                    </div>
+                  </div>
+                  
+                  <div className="p-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {perms.map((perm) => (
+                        <div
+                          key={perm._id}
+                          className="bg-gray-50 border border-gray-200 rounded-lg p-4 hover:bg-gray-100 transition-colors duration-200"
+                        >
+                          <div className="flex items-start justify-between mb-2">
+                            <div className="flex items-center space-x-2">
+                              <div className={`w-3 h-3 rounded-full ${perm.isActive ? 'bg-green-500' : 'bg-gray-400'}`}></div>
+                              <h4 className="font-medium text-gray-900 text-sm">
+                                {perm.name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase())}
+                              </h4>
+                            </div>
+                            <span
+                              className={`px-2 py-1 text-xs font-medium rounded-full border ${
+                                perm.isActive
+                                  ? "bg-green-100 text-green-800 border-green-200"
+                                  : "bg-gray-100 text-gray-600 border-gray-200"
+                              }`}
+                            >
+                              {perm.isActive ? "Active" : "Inactive"}
+                            </span>
+                          </div>
+                          {perm.description && (
+                            <p className="text-xs text-gray-600 leading-relaxed">{perm.description}</p>
+                          )}
+                          <div className="mt-3 pt-2 border-t border-gray-200">
+                            <p className="text-xs text-gray-500">
+                              Permission ID: <span className="font-mono">{perm.name}</span>
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Activity Tab */}
+        {activeTab === "activity" && (
+          <div>
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-6 gap-4">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Activity Logs</h2>
+                <p className="text-gray-600 mt-1">View and export system activity logs</p>
+              </div>
+              <button
+                onClick={() => setShowExportModal(true)}
+                disabled={exportingPDF}
+                className="px-4 py-2 bg-[#7C1D23] text-white rounded-lg font-medium hover:bg-[#5a1519] disabled:opacity-50 flex items-center space-x-2"
+              >
+                {exportingPDF ? (
+                  <>
+                    <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                    <span>Exporting...</span>
+                  </>
+                ) : (
+                  <>
+                    <FaDownload />
+                    <span>Export PDF</span>
+                  </>
+                )}
+              </button>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+              <div className="grid grid-cols-1 xl:grid-cols-4 gap-4">
+                <div className="xl:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Search
+                  </label>
+                  <div className="relative">
+                    <FaSearch className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      value={activityFilters.search}
+                      onChange={(e) => handleActivityFilterChange("search", e.target.value)}
+                      placeholder="Search by user, description, or entity..."
+                      className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Role
+                  </label>
+                  <select
+                    value={activityFilters.role}
+                    onChange={(e) => handleActivityFilterChange("role", e.target.value)}
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent text-sm"
+                  >
+                    <option value="all">All Roles</option>
+                    {roles.map((role) => (
+                      <option key={role._id} value={role.name}>
+                        {role.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Action
+                  </label>
+                  <select
+                    value={activityFilters.action}
+                    onChange={(e) => handleActivityFilterChange("action", e.target.value)}
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent text-sm"
+                  >
+                    <option value="all">All Actions</option>
+                    {ACTIVITY_ACTIONS.map((action) => (
+                      <option key={action} value={action}>
+                        {action.replace(/_/g, " ")}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Module
+                  </label>
+                  <select
+                    value={activityFilters.entityType}
+                    onChange={(e) => handleActivityFilterChange("entityType", e.target.value)}
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent text-sm"
+                  >
+                    <option value="all">All Modules</option>
+                    {ACTIVITY_ENTITY_TYPES.map((type) => (
+                      <option key={type} value={type}>
+                        {type.replace(/-/g, " ")}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end mt-4">
+                <button
+                  onClick={resetActivityFilters}
+                  className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50"
+                >
+                  Reset Filters
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {activityLoading ? (
+                <div className="p-12 text-center text-gray-500 flex flex-col items-center space-y-3">
+                  <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#7C1D23]" />
+                  <p>Loading activity logs...</p>
+                </div>
+              ) : (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Timestamp
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            User
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Role
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Action
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Module
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Details
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-100">
+                        {activityLogs.length === 0 ? (
+                          <tr>
+                            <td colSpan="6" className="px-6 py-12 text-center text-gray-500">
+                              No activity logs found for the selected filters.
+                            </td>
+                          </tr>
+                        ) : (
+                          activityLogs.map((log) => (
+                            <tr key={log._id} className="hover:bg-[#FDF5F5] transition-colors duration-150">
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                {formatActivityTimestamp(log.createdAt)}
+                              </td>
+                              <td className="px-6 py-4">
+                                <div className="text-sm font-medium text-gray-900">
+                                  {log.user?.name || "Unknown User"}
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  {log.user?.email || "No email"}
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                                {log.user?.role ? log.user.role.replace(/\b\w/g, (l) => l.toUpperCase()) : "N/A"}
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#FDE8EA] text-[#7C1D23] border border-[#F2B7BE]">
+                                  {log.action.replace(/_/g, " ")}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 capitalize">
+                                {log.entityType?.replace(/-/g, " ") || "—"}
+                                {log.entityName && (
+                                  <div className="text-xs text-gray-500 mt-1">{log.entityName}</div>
+                                )}
+                              </td>
+                              <td className="px-6 py-4 text-sm text-gray-700">
+                                {log.description || "No description provided."}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="px-6 py-4 border-t border-gray-200 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                    <div className="text-sm text-gray-600">
+                      Showing <span className="font-semibold">{activityLogs.length}</span> of{" "}
+                      <span className="font-semibold">{activityMeta.total}</span> activity logs
+                    </div>
+                    <div className="flex items-center space-x-3">
+                      <button
+                        onClick={() => setActivityPage((prev) => Math.max(prev - 1, 1))}
+                        disabled={activityPage <= 1}
+                        className="px-4 py-2 border rounded-lg text-sm font-medium disabled:opacity-50 hover:bg-gray-50"
+                      >
+                        Previous
+                      </button>
+                      <span className="text-sm text-gray-700">
+                        Page <span className="font-semibold">{activityPage}</span> of{" "}
+                        <span className="font-semibold">{effectiveActivityTotalPages}</span>
+                      </span>
+                      <button
+                        onClick={() =>
+                          setActivityPage((prev) => Math.min(prev + 1, effectiveActivityTotalPages))
+                        }
+                        disabled={activityMeta.total === 0 || activityPage >= effectiveActivityTotalPages}
+                        className="px-4 py-2 border rounded-lg text-sm font-medium disabled:opacity-50 hover:bg-gray-50"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Export PDF Modal */}
+        {showExportModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={() => setShowExportModal(false)}>
+            <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-bold text-gray-900">Export Activity Logs PDF</h3>
+                <button
+                  onClick={() => setShowExportModal(false)}
+                  className="text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  <FaTimes className="text-xl" />
+                </button>
+              </div>
+              
+              <p className="text-gray-600 mb-6">Choose where to save the PDF:</p>
+              
+              <div className="space-y-3">
+                <button
+                  onClick={() => handleExportActivityLogsPDF(false)}
+                  disabled={exportingPDF}
+                  className="w-full flex items-center justify-between p-4 border-2 border-gray-200 rounded-lg hover:border-[#7C1D23] hover:bg-[#FDF5F5] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center space-x-3">
+                    <FaSave className="text-2xl text-[#7C1D23]" />
+                    <div className="text-left">
+                      <div className="font-semibold text-gray-900">Save to Computer</div>
+                      <div className="text-sm text-gray-500">Download PDF to your device</div>
+                    </div>
+                  </div>
+                  <FaDownload className="text-gray-400" />
+                </button>
+                
+                <button
+                  onClick={() => handleExportActivityLogsPDF(true)}
+                  disabled={exportingPDF || !driveStatus.connected}
+                  className="w-full flex items-center justify-between p-4 border-2 border-gray-200 rounded-lg hover:border-[#7C1D23] hover:bg-[#FDF5F5] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center space-x-3">
+                    <FaCloud className="text-2xl text-[#7C1D23]" />
+                    <div className="text-left">
+                      <div className="font-semibold text-gray-900">Save to Google Drive</div>
+                      <div className="text-sm text-gray-500">
+                        {driveStatus.connected 
+                          ? "Upload PDF to your Google Drive Reports folder"
+                          : "Connect Google Drive in Settings first"}
+                      </div>
+                    </div>
+                  </div>
+                  {driveStatus.loading ? (
+                    <span className="animate-spin h-5 w-5 border-2 border-[#7C1D23] border-t-transparent rounded-full" />
+                  ) : (
+                    <FaCloud className="text-gray-400" />
+                  )}
+                </button>
+              </div>
+
+              {!driveStatus.connected && (
+                <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <p className="text-sm text-yellow-800">
+                    <FaExclamationTriangle className="inline mr-2" />
+                    Google Drive is not connected. Please connect it in Settings to use this option.
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => setShowExportModal(false)}
+                  disabled={exportingPDF}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Users Tab */}
+        {activeTab === "users" && (
+          <div>
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-6 gap-4">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">User Management</h2>
+                <p className="text-gray-600 mt-1">Manage users and their role assignments</p>
+              </div>
+              {/* Single Invite Card */}
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-4 w-full lg:w-80">
+                <h3 className="text-sm font-semibold text-gray-900 mb-2 flex items-center space-x-2">
+                  <FaUserShield className="text-[#7C1D23]" />
+                  <span>Invite a User</span>
+                </h3>
+                <p className="text-xs text-gray-500 mb-3">
+                  Send an invitation email to create an account. The user will complete their registration using a secure link.
+                </p>
+                <form onSubmit={handleInvite} className="space-y-2">
+                  {/* Role Select */}
+                  <select
+                    value={inviteForm.role}
+                    onChange={(e) => setInviteForm(prev => ({ ...prev, role: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                  >
+                    <option value="dean">Dean</option>
+                    <option value="faculty adviser">Faculty Adviser</option>
+                    <option value="program head">Program Head</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={inviteForm.name}
+                    onChange={(e) => setInviteForm(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="Full name"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                  />
+                  <input
+                    type="email"
+                    value={inviteForm.email}
+                    onChange={(e) => setInviteForm(prev => ({ ...prev, email: e.target.value }))}
+                    placeholder="Email (@buksu.edu.ph or @gmail.com for testing)"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                  />
+                  <button
+                    type="submit"
+                    disabled={inviting}
+                    className="w-full mt-1 px-3 py-2 bg-[#7C1D23] text-white rounded-lg text-sm font-medium hover:bg-[#5a1519] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
+                  >
+                    {inviting ? (
+                      <><span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" /><span>Sending...</span></>
+                    ) : (
+                      <><FaEnvelope className="text-white" /><span>Send Invitation</span></>
+                    )}
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {/* Search and Filter */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+              <div className="flex flex-col lg:flex-row gap-4">
+                <div className="flex-1">
+                  <div className="relative">
+                    <FaSearch className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      placeholder="Search users by name or email..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                    />
+                  </div>
+                </div>
+                <div className="lg:w-48">
+                  <select
+                    value={userFilter}
+                    onChange={(e) => setUserFilter(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                  >
+                    <option value="all">All Users</option>
+                    <option value="active">Active Only</option>
+                    <option value="inactive">Inactive Only</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gradient-to-r from-gray-50 to-gray-100">
+                  <tr>
+                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      <div className="flex items-center space-x-2">
+                        <FaUsers className="text-[#7C1D23]" />
+                        <span>User</span>
+                      </div>
+                    </th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      Contact
+                    </th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      <div className="flex items-center space-x-2">
+                        <FaShieldAlt className="text-[#7C1D23]" />
+                        <span>Role</span>
+                      </div>
+                    </th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      Role
+                    </th>
+                    <th className="px-6 py-4 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-100">
+                  {filteredUsers.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="px-6 py-12 text-center">
+                        <FaUsers className="mx-auto text-gray-400 text-4xl mb-4" />
+                        <p className="text-gray-500 text-lg">No users found matching your criteria</p>
+                        <p className="text-gray-400 text-sm mt-2">Try adjusting your search or filter settings</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredUsers.map((u) => (
+                      <tr key={u._id} className="hover:bg-[#FDECEC] transition-colors duration-150">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0 h-10 w-10">
+                            <div className="h-10 w-10 rounded-full bg-gradient-to-r from-[#A8353A] to-[#7C1D23] flex items-center justify-center text-white font-semibold">
+                              {u.name.charAt(0).toUpperCase()}
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <div className="text-sm font-semibold text-gray-900">{u.name}</div>
+                            <div className="text-sm text-gray-500">ID: {u._id.slice(-6)}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">{u.email}</div>
+                        <div className="text-sm text-gray-500">Contact Information</div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-[#FDE8EA] text-[#7C1D23] border border-[#F2B7BE]">
+                          <FaShieldAlt className="mr-1" />
+                          {u.role ? u.role.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ') : 'No Role'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className={`w-3 h-3 rounded-full mr-2 ${u.isActive ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                          <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full border ${
+                            u.isActive 
+                              ? 'bg-green-100 text-green-800 border-green-200' 
+                              : 'bg-red-100 text-red-800 border-red-200'
+                          }`}>
+                            {u.isActive ? 'Active' : 'Inactive'}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <select
+                          value={u.role || ''}
+                          onChange={(e) => handleUpdateUserRole(u._id, e.target.value)}
+                          className="block w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent text-sm"
+                        >
+                          <option value="">Select Role</option>
+                          {roles
+                            .filter((r) => r.isActive)
+                            .map((r) => (
+                              <option key={r.name} value={r.name}>
+                                {r.displayName}
+                              </option>
+                            ))}
+                        </select>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={() => openEditUserModal(u)}
+                            className="px-3 py-1 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors duration-200"
+                            title="Edit user details"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleToggleUserActivation(u)}
+                            className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors duration-200 ${
+                              u.isActive
+                                ? "bg-yellow-100 text-yellow-800 border border-yellow-200 hover:bg-yellow-50"
+                                : "bg-green-100 text-green-800 border border-green-200 hover:bg-green-50"
+                            }`}
+                            title={u.isActive ? "Deactivate user" : "Activate user"}
+                          >
+                            {u.isActive ? "Deactivate" : "Activate"}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteUser(u._id, u.name, u.role)}
+                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors duration-200 border border-red-200 hover:border-red-300"
+                            title="Delete user"
+                          >
+                            <FaTrash />
+                          </button>
+                        </div>
+                      </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Create/Edit Role Modal */}
+        {showRoleModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={() => { setShowRoleModal(false); setEditingRole(null); }}>
+            <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">
+                  {editingRole ? "Edit Role" : "Create New Role"}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRoleModal(false);
+                    setEditingRole(null);
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <FaTimes />
+                </button>
+              </div>
+              <form onSubmit={handleRoleFormSubmit}>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Role Name (lowercase, no spaces)
+                  </label>
+                  <input
+                    type="text"
+                    value={roleForm.name}
+                    onChange={(e) =>
+                      setRoleForm({ ...roleForm, name: e.target.value.toLowerCase() })
+                    }
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#7C1D23]"
+                    required
+                    disabled={editingRole}
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Display Name
+                  </label>
+                  <input
+                    type="text"
+                    value={roleForm.displayName}
+                    onChange={(e) =>
+                      setRoleForm({ ...roleForm, displayName: e.target.value })
+                    }
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#7C1D23]"
+                    required
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Description
+                  </label>
+                  <textarea
+                    value={roleForm.description}
+                    onChange={(e) =>
+                      setRoleForm({ ...roleForm, description: e.target.value })
+                    }
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#7C1D23]"
+                    rows="3"
+                  />
+                </div>
+                <div className="flex justify-end space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowRoleModal(false);
+                      setEditingRole(null);
+                    }}
+                    className="px-4 py-2 border rounded hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="px-4 py-2 bg-[#7C1D23] text-white rounded hover:bg-[#5a1519] disabled:opacity-50 flex items-center space-x-2"
+                  >
+                    <FaSave />
+                    <span>{editingRole ? "Update" : "Create"}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Edit User Modal */}
+        {showEditUserModal && editingUser && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6" onClick={closeEditUserModal}>
+            <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">Edit User</h3>
+                  <p className="text-sm text-gray-500">
+                    Adjust the user&apos;s name, email, or account status.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeEditUserModal}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <FaTimes />
+                </button>
+              </div>
+
+              <form onSubmit={handleEditUserSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Full Name
+                  </label>
+                  <input
+                    type="text"
+                    value={editUserForm.name}
+                    onChange={(e) =>
+                      setEditUserForm((prev) => ({ ...prev, name: e.target.value }))
+                    }
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#7C1D23]"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Email Address
+                  </label>
+                  <input
+                    type="email"
+                    value={editUserForm.email}
+                    onChange={(e) =>
+                      setEditUserForm((prev) => ({ ...prev, email: e.target.value }))
+                    }
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#7C1D23]"
+                    required
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {editingUser.role === "graduate student"
+                      ? "Graduate students must use @student.buksu.edu.ph or @gmail.com email addresses (for testing)."
+                      : "Faculty, Dean, and Program Head accounts must use @buksu.edu.ph or @gmail.com email addresses (for testing)."}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Account Status
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full border ${
+                        editUserForm.isActive
+                          ? "bg-green-100 text-green-800 border-green-200"
+                          : "bg-red-100 text-red-800 border-red-200"
+                      }`}
+                    >
+                      {editUserForm.isActive ? "Active" : "Inactive"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditUserForm((prev) => ({ ...prev, isActive: !prev.isActive }))
+                      }
+                      className="px-3 py-1 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors duration-200"
+                    >
+                      {editUserForm.isActive ? "Deactivate" : "Activate"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-md p-3">
+                  <p className="font-semibold text-gray-700 mb-1">User Details</p>
+                  <p>Role: {editingUser.role || "N/A"}</p>
+                  <p>User ID: {editingUser._id}</p>
+                </div>
+
+                <div className="flex justify-end space-x-2 pt-2 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={closeEditUserModal}
+                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={editUserSaving}
+                    className="px-4 py-2 bg-[#7C1D23] text-white rounded-md text-sm font-medium hover:bg-[#5a1519] disabled:opacity-50"
+                  >
+                    {editUserSaving ? "Saving..." : "Save Changes"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Backup Tab */}
+        {activeTab === "backup" && (
+          <div>
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-6 gap-4">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Backup & Recovery</h2>
+                <p className="text-gray-600 mt-1">Manage database and file backups</p>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button
+                  onClick={handleCreateBackup}
+                  disabled={creatingBackup}
+                  className="px-4 py-2 bg-[#7C1D23] text-white rounded-lg font-medium hover:bg-[#5a1519] disabled:opacity-50 flex items-center space-x-2"
+                >
+                  {creatingBackup ? (
+                    <>
+                      <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                      <span>Creating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FaDownload />
+                      <span>Create Backup</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={handleCleanBackups}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 flex items-center space-x-2"
+                >
+                  <FaTrashAlt />
+                  <span>Clean Old Backups</span>
+                </button>
+                <button
+                  onClick={handleDeleteAllBackups}
+                  className="px-4 py-2 border border-red-300 text-red-700 rounded-lg font-medium hover:bg-red-50 flex items-center space-x-2"
+                >
+                  <FaTrashAlt />
+                  <span>Delete All Backups</span>
+                </button>
+                <button
+                  onClick={fetchBackups}
+                  disabled={backupLoading}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 flex items-center space-x-2"
+                >
+                  <FaDatabase />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              {backupLoading ? (
+                <div className="p-12 text-center text-gray-500 flex flex-col items-center space-y-3">
+                  <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#7C1D23]" />
+                  <p>Loading backups...</p>
+                </div>
+              ) : backups.length === 0 ? (
+                <div className="p-12 text-center text-gray-500">
+                  <FaDatabase className="mx-auto h-12 w-12 mb-4 text-gray-300" />
+                  <p className="text-lg font-medium mb-2">No backups found</p>
+                  <p className="text-sm">Create your first backup to get started</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                          Type
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                          Timestamp
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                          Size
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                          Details
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-100">
+                      {backups.map((backup, index) => (
+                        <tr key={index} className="hover:bg-[#FDF5F5] transition-colors duration-150">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                              backup.type === "metadata" 
+                                ? "bg-blue-100 text-blue-800" 
+                                : backup.type === "database"
+                                ? "bg-green-100 text-green-800"
+                                : "bg-purple-100 text-purple-800"
+                            }`}>
+                              {backup.type === "metadata" ? "Full Backup" : backup.type}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {formatBackupDate(backup.timestamp || backup.mtime)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                            {formatFileSize(backup.size)}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-700">
+                            {backup.type === "metadata" && backup.backups ? (
+                              <div className="space-y-1">
+                                {backup.backups.database && (
+                                  <div className="text-xs">Database: {backup.backups.database.fileName}</div>
+                                )}
+                                {backup.backups.uploads && (
+                                  <div className="text-xs">Uploads: {formatFileSize(backup.backups.uploads.size)}</div>
+                                )}
+                              </div>
+                            ) : (
+                              backup.name
+                            )}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                            {backup.type === "metadata" ? (
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await downloadFullBackupByMetadataFile(backup.name);
+                                    await showSuccess("Downloaded", "Backup downloaded successfully.");
+                                  } catch (error) {
+                                    showError("Error", error.response?.data?.message || "Failed to download backup");
+                                  }
+                                }}
+                                className="px-3 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition-colors"
+                              >
+                                Download
+                              </button>
+                            ) : (
+                              <span className="text-xs text-gray-400">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="flex items-start">
+                <FaExclamationTriangle className="text-blue-600 mt-1 mr-3" />
+                <div className="text-sm text-blue-800">
+                  <p className="font-semibold mb-1">Backup Information</p>
+                  <ul className="list-disc list-inside space-y-1 text-xs">
+                    <li>Backups are created automatically daily at 2:00 AM</li>
+                    <li>Old backups are automatically cleaned after 30 days</li>
+                    <li>Full backups include both database and uploaded files</li>
+                    <li>To restore a backup, use the restore command: <code className="bg-blue-100 px-1 rounded">npm run restore</code></li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default Admin;
