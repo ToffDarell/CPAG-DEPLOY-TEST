@@ -657,98 +657,155 @@ export const deletePanel = async (req, res) => {
   }
 };
 
+const buildPanelMonitoringQuery = ({ status, startDate, endDate } = {}) => {
+  const query = {};
+
+  if (status && status !== "all") {
+    query.status = status;
+  }
+
+  if (startDate || endDate) {
+    query.createdAt = {};
+
+    if (startDate) {
+      query.createdAt.$gte = new Date(startDate);
+    }
+
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      query.createdAt.$lte = end;
+    }
+  }
+
+  return query;
+};
+
+const getPanelMonitoringMemberIdentifier = (memberOrReview) => {
+  if (!memberOrReview) return null;
+
+  if (memberOrReview.isExternal) {
+    return memberOrReview.panelistEmail || memberOrReview.email || null;
+  }
+
+  const facultyId = memberOrReview.panelist?._id ||
+    memberOrReview.panelist ||
+    memberOrReview.faculty?._id ||
+    memberOrReview.faculty;
+
+  return facultyId?.toString() || null;
+};
+
+const getPanelMonitoringMemberName = (member) => {
+  if (!member) return "Unknown";
+  if (member.isExternal) {
+    return member.name || member.email || "External Panelist";
+  }
+
+  return member.faculty?.name || "Unknown Faculty";
+};
+
+const formatResearchStageLabel = (stage) => {
+  if (!stage) return "N/A";
+
+  const labels = {
+    chapter1: "Chapter 1",
+    chapter2: "Chapter 2",
+    chapter3: "Chapter 3",
+  };
+
+  if (labels[stage]) {
+    return labels[stage];
+  }
+
+  return String(stage)
+    .replace(/[_-]/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const formatStatusLabel = (status) => {
+  if (!status) return "N/A";
+  return status.replace(/[_-]/g, " ");
+};
+
+const getPanelMonitoringStats = (panels = []) => ({
+  total: panels.length,
+  pending: panels.filter(panel => panel.status === "pending").length,
+  inProgress: panels.filter(panel => panel.status === "in_progress").length,
+  completed: panels.filter(panel => panel.status === "completed").length,
+  withAlerts: panels.filter(panel => panel.hasAlerts).length,
+});
+
+const getPanelMonitoringData = async (filters = {}, { persistProgress = true } = {}) => {
+  const panels = await Panel.find(buildPanelMonitoringQuery(filters))
+    .populate("research", "title students status stage progress")
+    .populate("members.faculty", "name email")
+    .populate("reviews.panelist", "name email")
+    .populate("assignedBy", "name")
+    .sort({ createdAt: -1 });
+
+  const now = new Date();
+
+  return panels.map((panel) => {
+    const activeMembers = panel.members.filter(member => member.isSelected);
+    const activeMemberIds = activeMembers
+      .map(member => getPanelMonitoringMemberIdentifier(member))
+      .filter(Boolean);
+
+    const submittedReviews = panel.reviews.filter((review) => {
+      const reviewIdentifier = getPanelMonitoringMemberIdentifier(review);
+      return review.status === "submitted" && activeMemberIds.includes(reviewIdentifier);
+    });
+
+    const progress = activeMembers.length > 0
+      ? Math.round((submittedReviews.length / activeMembers.length) * 100)
+      : 0;
+
+    const overdueReviews = panel.reviews.filter((review) => {
+      const reviewIdentifier = getPanelMonitoringMemberIdentifier(review);
+      if (!reviewIdentifier || !activeMemberIds.includes(reviewIdentifier)) return false;
+      if (review.status === "submitted") return false;
+      return review.dueDate && new Date(review.dueDate) < now;
+    });
+
+    const reviewedIdentifiers = panel.reviews
+      .map(review => getPanelMonitoringMemberIdentifier(review))
+      .filter(Boolean);
+
+    const missingReviews = activeMembers.filter((member) => {
+      const memberIdentifier = getPanelMonitoringMemberIdentifier(member);
+      return memberIdentifier && !reviewedIdentifiers.includes(memberIdentifier);
+    });
+
+    if (persistProgress && panel.progress !== progress) {
+      panel.progress = progress;
+      panel.save().catch((saveError) => {
+        console.error("Error saving panel progress:", saveError);
+      });
+    }
+
+    return {
+      ...panel.toObject(),
+      progress,
+      overdueCount: overdueReviews.length,
+      missingCount: missingReviews.length,
+      hasAlerts: overdueReviews.length > 0 || missingReviews.length > 0,
+      submittedReviewsCount: submittedReviews.length,
+      totalActiveMembers: activeMembers.length,
+      activeMemberNames: activeMembers.map(getPanelMonitoringMemberName).filter(Boolean),
+      researchStageLabel: formatResearchStageLabel(panel.research?.stage),
+      researchStatusLabel: formatStatusLabel(panel.research?.status),
+      panelStatusLabel: formatStatusLabel(panel.status),
+      panelTypeLabel: formatStatusLabel(panel.type),
+      lastUpdated: formatDateValue(panel.updatedAt, true),
+    };
+  });
+};
+
 // Get panel monitoring data
 export const getPanelMonitoring = async (req, res) => {
   try {
-    const { status, startDate, endDate } = req.query;
-    
-    // Build query
-    const query = {};
-    if (status && status !== 'all') {
-      query.status = status;
-    }
-    if (startDate || endDate) {
-      query.createdAt = {};
-      if (startDate) query.createdAt.$gte = new Date(startDate);
-      if (endDate) query.createdAt.$lte = new Date(endDate);
-    }
-
-    const panels = await Panel.find(query)
-      .populate("research", "title students status stage progress")
-      .populate("members.faculty", "name email")
-      .populate("reviews.panelist", "name email")
-      .populate("assignedBy", "name")
-      .sort({ createdAt: -1 });
-
-    // Calculate progress and alerts for each panel
-    const panelsWithProgress = panels.map(panel => {
-      const activeMembers = panel.members.filter(m => m.isSelected);
-      const activeMemberIds = activeMembers.map(m => {
-        if (m.isExternal) {
-          return m.email; // Use email for external panelists
-        }
-        const facultyId = m.faculty?._id || m.faculty;
-        return facultyId?.toString() || facultyId;
-      }).filter(Boolean);
-      
-      // Calculate progress based on submitted reviews
-      const submittedReviews = panel.reviews.filter(r => {
-        if (r.isExternal) {
-          return r.status === 'submitted' && activeMemberIds.includes(r.panelistEmail);
-        }
-        const panelistId = r.panelist?._id || r.panelist;
-        return r.status === 'submitted' && activeMemberIds.includes(panelistId?.toString() || panelistId);
-      });
-      const progress = activeMembers.length > 0 
-        ? Math.round((submittedReviews.length / activeMembers.length) * 100)
-        : 0;
-
-      // Check for overdue reviews
-      const now = new Date();
-      const overdueReviews = panel.reviews.filter(r => {
-        let isActivePanelist = false;
-        if (r.isExternal) {
-          isActivePanelist = activeMemberIds.includes(r.panelistEmail);
-        } else {
-          const panelistId = r.panelist?._id || r.panelist;
-          isActivePanelist = activeMemberIds.includes(panelistId?.toString() || panelistId);
-        }
-        if (!isActivePanelist) return false;
-        if (r.status === 'submitted') return false;
-        return r.dueDate && new Date(r.dueDate) < now;
-      });
-
-      // Check for missing reviews (active members without review entries)
-      const reviewedIdentifiers = panel.reviews.map(r => {
-        if (r.isExternal) {
-          return r.panelistEmail;
-        }
-        const panelistId = r.panelist?._id || r.panelist;
-        return panelistId?.toString() || panelistId;
-      });
-      const missingReviews = activeMembers.filter(m => {
-        if (m.isExternal) {
-          return !reviewedIdentifiers.includes(m.email);
-        }
-        const facultyId = m.faculty?._id || m.faculty;
-        return !reviewedIdentifiers.includes(facultyId?.toString() || facultyId);
-      });
-
-      // Update panel progress
-      panel.progress = progress;
-      panel.save().catch(err => console.error('Error saving panel progress:', err));
-
-      return {
-        ...panel.toObject(),
-        progress,
-        overdueCount: overdueReviews.length,
-        missingCount: missingReviews.length,
-        hasAlerts: overdueReviews.length > 0 || missingReviews.length > 0,
-        submittedReviewsCount: submittedReviews.length,
-        totalActiveMembers: activeMembers.length,
-      };
-    });
-
+    const panelsWithProgress = await getPanelMonitoringData(req.query);
     res.json(panelsWithProgress);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -1679,6 +1736,204 @@ export const getResearchRecords = async (req, res) => {
     res.json(research);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+export const exportResearchRecords = async (req, res) => {
+  let tempDirPath = null;
+
+  try {
+    const { filters = {}, format = "pdf" } = req.body || {};
+    const normalizedFormat = format === "xlsx" ? "xlsx" : "pdf";
+
+    const query = { status: { $ne: "archived" } };
+    if (filters.status && filters.status !== "all") {
+      query.status = filters.status;
+    }
+    if (filters.stage && filters.stage !== "all") {
+      query.stage = filters.stage;
+    }
+    if (filters.sharedWithDean) {
+      query.sharedWithDean = true;
+    }
+    if (filters.finalized) {
+      query.finalizedDate = { $exists: true, $ne: null };
+    }
+    if (filters.progress !== undefined && filters.progress !== null && filters.progress !== "") {
+      query.progress = Number(filters.progress);
+    }
+    if (filters.startDate || filters.endDate) {
+      query.createdAt = {};
+      if (filters.startDate) query.createdAt.$gte = new Date(filters.startDate);
+      if (filters.endDate) {
+        const end = new Date(filters.endDate);
+        end.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = end;
+      }
+    }
+
+    const research = await Research.find(query)
+      .populate("students", "name email")
+      .populate("adviser", "name email")
+      .sort({ createdAt: -1 });
+
+    if (!research.length) {
+      return res.status(400).json({ message: "No research records found matching the selected filters." });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user || !user.driveAccessToken) {
+      return res.status(400).json({
+        message: "Please connect your Google Drive account in Settings before exporting research records.",
+      });
+    }
+
+    const generatedBy = user?.name || user?.email || "Program Head";
+    const filtersSummary = Object.entries(filters)
+      .filter(([, value]) => value !== undefined && value !== null && value !== "" && value !== "all")
+      .map(([key, value]) => `${key}: ${value}`)
+      .join(", ");
+
+    const rows = research.map((item) => ({
+      title: item.title || "Untitled",
+      students: (item.students || []).map((student) => student?.name).filter(Boolean).join(", ") || "N/A",
+      adviser: item.adviser?.name || "Not assigned",
+      status: formatProgramHeadResearchStatus(item.status),
+      stage: formatProgramHeadResearchStage(item.stage),
+      progress: `${Number(item.progress || 0)}%`,
+      finalized: item.finalizedDate ? "Yes" : "No",
+      createdAt: formatDateValue(item.createdAt),
+      updatedAt: formatDateValue(item.updatedAt),
+    }));
+
+    let fileBuffer;
+
+    if (normalizedFormat === "xlsx") {
+      fileBuffer = await generateProgramHeadResearchExcelBuffer(rows, {
+        generatedBy,
+        filtersSummary,
+      });
+    } else {
+      fileBuffer = await generateProgramHeadResearchPdfBuffer(rows, {
+        generatedBy,
+        filtersSummary,
+      });
+    }
+
+    const normalizedBuffer = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(fileBuffer);
+    const mimeType = normalizedFormat === "xlsx"
+      ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      : "application/pdf";
+    const fileName = `research-records-${new Date().toISOString().replace(/[:.]/g, "-")}.${normalizedFormat}`;
+
+    tempDirPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), "research-export-"));
+    const tempFilePath = path.join(tempDirPath, fileName);
+    await fs.promises.writeFile(tempFilePath, normalizedBuffer);
+
+    const driveTokens = buildDriveTokens(user);
+    if (!driveTokens?.access_token) {
+      throw new Error("Unable to read Google Drive credentials. Please reconnect your Drive account.");
+    }
+
+    const reportsFolderId = getProgramHeadPanelReportFolderId();
+    if (!reportsFolderId) {
+      throw new Error("Program Head reports folder ID is not configured.");
+    }
+
+    let driveFile = null;
+    let driveUploadError = null;
+    try {
+      const { file, tokens: updatedTokens } = await uploadFileToDrive(
+        tempFilePath,
+        fileName,
+        mimeType,
+        driveTokens,
+        { parentFolderId: reportsFolderId, userId: user._id.toString() }
+      );
+      driveFile = file;
+      await applyUpdatedDriveTokens(user, updatedTokens);
+    } catch (driveError) {
+      driveUploadError = driveError;
+      console.error("[ProgramHead Export Research] Drive upload failed:", driveError?.message || driveError);
+    }
+
+    let exportRecord = null;
+    try {
+      exportRecord = await Export.create({
+        exportedBy: req.user.id,
+        format: normalizedFormat,
+        recordCount: rows.length,
+        selectedFields: [],
+        filters,
+        driveFileId: driveFile?.id || undefined,
+        driveFileLink: driveFile?.webViewLink || undefined,
+        driveFileName: driveFile?.name || undefined,
+        driveFolderId: reportsFolderId || undefined,
+        fileName,
+        fileSize: normalizedBuffer.length,
+        mimeType,
+        status: "completed",
+      });
+    } catch (saveError) {
+      console.error("Error saving research export record:", saveError);
+    }
+
+    await Activity.create({
+      user: req.user.id,
+      action: "export",
+      entityType: "research",
+      entityName: "Research Records",
+      description: `Exported ${rows.length} research record(s) as ${normalizedFormat.toUpperCase()}`,
+      metadata: {
+        format: normalizedFormat,
+        recordCount: rows.length,
+        filters: filtersSummary || null,
+        driveFileId: driveFile?.id,
+        exportId: exportRecord?._id || null,
+      },
+    }).catch((activityError) => console.error("Error logging research export activity:", activityError));
+
+    try {
+      await fs.promises.unlink(tempFilePath);
+      await fs.promises.rm(tempDirPath, { recursive: true, force: true });
+      tempDirPath = null;
+    } catch (cleanupError) {
+      console.error("Error cleaning up research export temp files:", cleanupError);
+    }
+
+    const exportedAs = normalizedFormat === "xlsx" ? "Excel" : "PDF";
+    const driveFolderLink = reportsFolderId
+      ? `https://drive.google.com/drive/folders/${reportsFolderId}`
+      : null;
+
+    const message = driveFile
+      ? `Research records exported as ${exportedAs} and saved to your Google Drive Reports folder.`
+      : `Research records exported as ${exportedAs}, but failed to upload to Google Drive (${driveUploadError?.message || "unknown error"}).`;
+
+    res.json({
+      success: true,
+      hasWarning: !driveFile,
+      message,
+      format: normalizedFormat,
+      recordCount: rows.length,
+      driveFile,
+      driveFolderId: reportsFolderId || null,
+      driveFolderLink,
+      filters: filtersSummary || null,
+      exportId: exportRecord?._id || null,
+    });
+  } catch (error) {
+    console.error("Error exporting research records:", error);
+
+    if (tempDirPath) {
+      try {
+        await fs.promises.rm(tempDirPath, { recursive: true, force: true });
+      } catch (cleanupError) {
+        console.error("Error cleaning up failed research export temp directory:", cleanupError);
+      }
+    }
+
+    res.status(500).json({ message: error.message || "Failed to export research records." });
   }
 };
 
@@ -3752,6 +4007,729 @@ const escapeHtml = (text) => {
     .replace(/'/g, "&#39;");
 };
 
+const getUniversityLogoPath = () => {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const projectRoot = path.resolve(__dirname, "..", "..");
+  const logoPaths = [
+    path.join(projectRoot, "frontend", "public", "logo.jpg"),
+    path.join(projectRoot, "frontend", "public", "logo.png"),
+    path.join(projectRoot, "public", "logo.jpg"),
+    path.join(projectRoot, "public", "logo.png"),
+    path.join(projectRoot, "backend", "public", "logo.jpg"),
+    path.join(projectRoot, "backend", "public", "logo.png"),
+    path.join(process.cwd(), "frontend", "public", "logo.jpg"),
+    path.join(process.cwd(), "frontend", "public", "logo.png"),
+  ];
+
+  return logoPaths.find((logoPath) => fs.existsSync(logoPath)) || "";
+};
+
+const getUniversityLogoBase64 = () => {
+  const logoPath = getUniversityLogoPath();
+  if (!logoPath) {
+    return "";
+  }
+
+  try {
+    const logoBuffer = fs.readFileSync(logoPath);
+    const logoExt = path.extname(logoPath).toLowerCase();
+    const mimeType = logoExt === ".png" ? "image/png" : "image/jpeg";
+    return `data:${mimeType};base64,${logoBuffer.toString("base64")}`;
+  } catch (logoError) {
+    console.log("Error reading logo:", logoError.message);
+    return "";
+  }
+};
+
+const getProgramHeadPanelReportFolderId = () => (
+  process.env.GOOGLE_DRIVE_PROGRAM_HEAD_PANEL_FOLDER_ID ||
+  process.env.GOOGLE_DRIVE_PROGRAM_HEAD_FOLDER_ID ||
+  getPanelDriveFolderId()
+);
+
+const PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS = [
+  { key: "title", label: "Research Title", width: 34, pdfWidth: 20 },
+  { key: "students", label: "Student(s)", width: 28, pdfWidth: 16 },
+  { key: "adviser", label: "Adviser", width: 24, pdfWidth: 15 },
+  { key: "status", label: "Status", width: 16, pdfWidth: 10 },
+  { key: "stage", label: "Stage", width: 14, pdfWidth: 10 },
+  { key: "progress", label: "Progress (%)", width: 14, pdfWidth: 8 },
+  { key: "finalized", label: "Finalized", width: 12, pdfWidth: 7 },
+  { key: "createdAt", label: "Created", width: 16, pdfWidth: 7 },
+  { key: "updatedAt", label: "Updated", width: 16, pdfWidth: 7 },
+];
+
+const formatProgramHeadResearchStatus = (status) => {
+  if (!status) return "N/A";
+  return String(status)
+    .replace(/[_-]/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const formatProgramHeadResearchStage = (stage) => {
+  if (!stage) return "N/A";
+
+  const labels = {
+    proposal: "Proposal",
+    chapter1: "Chapter 1",
+    chapter2: "Chapter 2",
+    chapter3: "Chapter 3",
+    defense: "Defense",
+    final: "Final",
+  };
+
+  return labels[stage] || String(stage).replace(/[_-]/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const generateProgramHeadResearchPdfHtmlTemplate = (rows, { generatedBy, filtersSummary }) => {
+  const digitalSignature = generatePanelDigitalSignature({
+    recordCount: rows.length,
+    generatedBy,
+  });
+  const logoBase64 = getUniversityLogoBase64();
+
+  const tableColumns = PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.map(
+    (column) => `<col style="width: ${column.pdfWidth}%">`
+  ).join("");
+  const tableHeaders = PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.map(
+    (column) => `<th>${escapeHtml(column.label)}</th>`
+  ).join("");
+  const tableRows = rows.map((row) => {
+    const cells = PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.map((column) => {
+      const value = row[column.key] ?? "N/A";
+      const cellClass = ["title", "students", "adviser"].includes(column.key) ? "wrap-cell" : "";
+      return `<td class="${cellClass}">${escapeHtml(value)}</td>`;
+    }).join("");
+
+    return `<tr>${cells}</tr>`;
+  }).join("");
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Research Records Report</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    @page {
+      size: A4 landscape;
+      margin: 1cm;
+    }
+
+    body {
+      font-family: 'Helvetica', 'Arial', sans-serif;
+      font-size: 9px;
+      color: #111827;
+      line-height: 1.4;
+      background: #ffffff;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    .logo-container {
+      margin-bottom: 10px;
+    }
+
+    .logo-container img {
+      width: 90px;
+      height: 90px;
+      object-fit: contain;
+    }
+
+    .university-name {
+      font-size: 22px;
+      font-weight: bold;
+      color: #7C1D23;
+      margin-bottom: 5px;
+    }
+
+    .university-address {
+      font-size: 12px;
+      color: #374151;
+      margin-bottom: 3px;
+    }
+
+    .university-contact {
+      font-size: 10px;
+      color: #1E40AF;
+      margin-bottom: 8px;
+    }
+
+    .college-name {
+      font-size: 13px;
+      color: #374151;
+      margin-bottom: 10px;
+    }
+
+    .header-line {
+      border-top: 2px solid #7C1D23;
+      margin: 15px 0;
+    }
+
+    .report-title {
+      font-size: 16px;
+      font-weight: bold;
+      color: #111827;
+      text-align: center;
+      margin: 15px 0;
+    }
+
+    .filters-box {
+      background-color: #F9FAFB;
+      border: 1px solid #E5E7EB;
+      padding: 12px;
+      margin-bottom: 20px;
+      border-radius: 4px;
+    }
+
+    .filters-box p {
+      margin: 4px 0;
+      font-size: 10px;
+      color: #374151;
+    }
+
+    .report {
+      width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+      font-size: 8.5px;
+    }
+
+    .report thead {
+      display: table-header-group;
+      background-color: #7C1D23;
+      color: #ffffff;
+    }
+
+    .report thead th {
+      padding: 8px 6px;
+      text-align: left;
+      font-weight: bold;
+      font-size: 8px;
+      border: 1px solid #5a1519;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      word-break: break-word;
+    }
+
+    .report tbody tr {
+      page-break-inside: avoid;
+      border-bottom: 1px solid #E5E7EB;
+    }
+
+    .report tbody tr:nth-child(even) {
+      background-color: #F9FAFB;
+    }
+
+    .report tbody td {
+      padding: 6px;
+      border: 1px solid #E5E7EB;
+      white-space: normal;
+      overflow: visible;
+      word-wrap: break-word;
+      text-overflow: clip;
+      vertical-align: top;
+    }
+
+    .report tbody td.wrap-cell {
+      white-space: normal;
+      word-wrap: break-word;
+      overflow: visible;
+      text-overflow: clip;
+    }
+
+    .footer {
+      margin-top: 30px;
+      padding-top: 15px;
+      border-top: 1px solid #E5E7EB;
+      text-align: center;
+      font-size: 8px;
+      color: #6B7280;
+    }
+
+    .footer p {
+      margin: 4px 0;
+    }
+
+    .footer .signature {
+      margin-top: 10px;
+      font-size: 8px;
+      color: #000000;
+      text-align: left;
+    }
+
+    @media print {
+      .report thead {
+        display: table-header-group;
+      }
+      .report tbody tr {
+        page-break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    ${logoBase64 ? `<div class="logo-container"><img src="${logoBase64}" alt="BUKSU Logo" /></div>` : ""}
+    <div class="university-name">BUKIDNON STATE UNIVERSITY</div>
+    <div class="university-address">Malaybalay City, Bukidnon 8700</div>
+    <div class="university-contact">Tel (088) 813-5661 to 5663; TeleFax (088) 813-2717, www.buksu.edu.ph</div>
+    <div class="college-name">College of Public Administration and Governance</div>
+    <div class="header-line"></div>
+  </div>
+
+  <div class="report-title">RESEARCH RECORDS REPORT</div>
+
+  <div class="filters-box">
+    <p><strong>Generated by:</strong> ${escapeHtml(generatedBy || "Program Head")}</p>
+    <p><strong>Date Generated:</strong> ${escapeHtml(formatDateValue(new Date(), true))}</p>
+    <p><strong>Total Records:</strong> ${rows.length}</p>
+    ${filtersSummary ? `<p><strong>Applied Filters:</strong> ${escapeHtml(filtersSummary)}</p>` : ""}
+  </div>
+
+  <table class="report">
+    <colgroup>${tableColumns}</colgroup>
+    <thead>
+      <tr>${tableHeaders}</tr>
+    </thead>
+    <tbody>
+      ${tableRows}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    <p>This report is automatically generated by the Masteral Archive & Monitoring System.</p>
+    <p>Bukidnon State University - College of Public Administration and Governance</p>
+    <div class="signature">${escapeHtml(digitalSignature)}</div>
+  </div>
+</body>
+</html>
+  `;
+};
+
+const generateProgramHeadResearchPdfBuffer = async (rows, { generatedBy, filtersSummary }) => {
+  const html = generateProgramHeadResearchPdfHtmlTemplate(rows, { generatedBy, filtersSummary });
+
+  try {
+    const puppeteer = await import("puppeteer").catch(() => null);
+    if (puppeteer) {
+      const browser = await puppeteer.default.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: "networkidle0" });
+      const pdfBuffer = await page.pdf({
+        format: "A4",
+        landscape: true,
+        preferCSSPageSize: true,
+        margin: {
+          top: "1cm",
+          right: "1cm",
+          bottom: "1cm",
+          left: "1cm",
+        },
+        printBackground: true,
+        displayHeaderFooter: false,
+      });
+      await browser.close();
+      return pdfBuffer;
+    }
+  } catch (puppeteerError) {
+    console.log("Puppeteer not available, trying alternative methods:", puppeteerError.message);
+  }
+
+  try {
+    const pdf = await import("html-pdf").catch(() => null);
+    if (pdf) {
+      return new Promise((resolve, reject) => {
+        pdf.default.create(html, {
+          format: "A4",
+          orientation: "landscape",
+          border: {
+            top: "1cm",
+            right: "1cm",
+            bottom: "1cm",
+            left: "1cm",
+          },
+          type: "pdf",
+          quality: "75",
+        }).toBuffer((err, buffer) => {
+          if (err) reject(err);
+          else resolve(buffer);
+        });
+      });
+    }
+  } catch (htmlPdfError) {
+    console.log("html-pdf not available, using PDFKit fallback:", htmlPdfError.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: "A4",
+      layout: "landscape",
+      margin: 36,
+      bufferPages: true,
+    });
+    const chunks = [];
+    const digitalSignature = generatePanelDigitalSignature({
+      recordCount: rows.length,
+      generatedBy,
+    });
+
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    const logoPath = getUniversityLogoPath();
+    if (logoPath) {
+      try {
+        const logoSize = 90;
+        doc.image(logoPath, (doc.page.width - logoSize) / 2, 30, { width: logoSize, height: logoSize });
+        doc.y = 130;
+      } catch (logoError) {
+        doc.y = 40;
+      }
+    } else {
+      doc.y = 40;
+    }
+
+    doc.font("Helvetica-Bold")
+      .fontSize(22)
+      .fillColor("#7C1D23")
+      .text("BUKIDNON STATE UNIVERSITY", { align: "center" });
+    doc.moveDown(0.2);
+    doc.font("Helvetica")
+      .fontSize(12)
+      .fillColor("#374151")
+      .text("Malaybalay City, Bukidnon 8700", { align: "center" });
+    doc.moveDown(0.2);
+    doc.fontSize(10)
+      .fillColor("#1E40AF")
+      .text("Tel (088) 813-5661 to 5663; TeleFax (088) 813-2717, www.buksu.edu.ph", { align: "center" });
+    doc.moveDown(0.3);
+    doc.font("Helvetica")
+      .fontSize(13)
+      .fillColor("#374151")
+      .text("College of Public Administration and Governance", { align: "center" });
+    doc.moveDown(0.5);
+    doc.moveTo(doc.page.margins.left, doc.y)
+      .lineTo(doc.page.width - doc.page.margins.right, doc.y)
+      .strokeColor("#7C1D23")
+      .lineWidth(2)
+      .stroke();
+    doc.moveDown(0.8);
+
+    doc.font("Helvetica-Bold")
+      .fontSize(16)
+      .fillColor("#111827")
+      .text("RESEARCH RECORDS REPORT", { align: "center" });
+    doc.moveDown(0.5);
+
+    const boxY = doc.y;
+    doc.rect(doc.page.margins.left, boxY, doc.page.width - (doc.page.margins.left + doc.page.margins.right), filtersSummary ? 68 : 52)
+      .fillColor("#F9FAFB")
+      .fill()
+      .strokeColor("#E5E7EB")
+      .lineWidth(1)
+      .stroke();
+
+    doc.y = boxY + 10;
+    doc.fontSize(10).fillColor("#374151");
+    doc.text(`Generated by: ${generatedBy || "Program Head"}`, doc.page.margins.left + 10);
+    doc.moveDown(0.3);
+    doc.text(`Date Generated: ${formatDateValue(new Date(), true)}`, doc.page.margins.left + 10);
+    doc.moveDown(0.3);
+    doc.text(`Total Records: ${rows.length}`, doc.page.margins.left + 10);
+    if (filtersSummary) {
+      doc.moveDown(0.3);
+      doc.text(`Applied Filters: ${filtersSummary}`, doc.page.margins.left + 10);
+    }
+
+    doc.y = boxY + (filtersSummary ? 78 : 62);
+    doc.moveDown(0.6);
+
+    rows.forEach((row, index) => {
+      if (doc.y > doc.page.height - doc.page.margins.bottom - 90) {
+        doc.addPage();
+      }
+
+      doc.font("Helvetica-Bold")
+        .fontSize(11)
+        .fillColor("#111827")
+        .text(`${index + 1}. ${row.title}`);
+      doc.font("Helvetica")
+        .fontSize(9)
+        .fillColor("#374151")
+        .text(`Students: ${row.students}`);
+      doc.text(`Adviser: ${row.adviser} | Status: ${row.status} | Stage: ${row.stage} | Progress: ${row.progress} | Finalized: ${row.finalized}`);
+      doc.fontSize(8)
+        .fillColor("#6B7280")
+        .text(`Created: ${row.createdAt} | Updated: ${row.updatedAt}`);
+      doc.moveDown(0.6);
+    });
+
+    doc.moveDown(0.6);
+    doc.moveTo(doc.page.margins.left, doc.y)
+      .lineTo(doc.page.width - doc.page.margins.right, doc.y)
+      .strokeColor("#E5E7EB")
+      .lineWidth(1)
+      .stroke();
+    doc.moveDown(0.3);
+    doc.fontSize(8).fillColor("#6B7280").text(
+      "This report is automatically generated by the Masteral Archive & Monitoring System.",
+      { align: "center" }
+    );
+    doc.moveDown(0.2);
+    doc.fontSize(8).fillColor("#9CA3AF").text(
+      "Bukidnon State University - College of Public Administration and Governance",
+      { align: "center" }
+    );
+
+    addPageNumbers(doc, digitalSignature);
+    doc.end();
+  });
+};
+
+const generateProgramHeadResearchExcelBuffer = async (rows, { generatedBy, filtersSummary }) => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = generatedBy || "Program Head";
+  workbook.created = new Date();
+
+  const worksheet = workbook.addWorksheet("Research Records", {
+    properties: { defaultRowHeight: 20 },
+    pageSetup: {
+      fitToPage: true,
+      orientation: "landscape",
+      margins: { left: 0.7, right: 0.7, top: 0.75, bottom: 0.75, header: 0.3, footer: 0.3 },
+    },
+  });
+
+  worksheet.columns = PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.map(({ key, width }) => ({ key, width }));
+  const totalColumns = PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.length;
+  const digitalSignature = generatePanelDigitalSignature({
+    recordCount: rows.length,
+    generatedBy,
+  });
+
+  let logoRowOffset = 0;
+  const logoPath = getUniversityLogoPath();
+  if (logoPath) {
+    try {
+      const ext = path.extname(logoPath).substring(1).toLowerCase();
+      const extension = ext === "jpg" ? "jpeg" : ext;
+      const imageId = workbook.addImage({
+        filename: logoPath,
+        extension,
+      });
+
+      worksheet.mergeCells(1, 1, 1, totalColumns);
+      worksheet.getCell(1, 1).alignment = { horizontal: "center", vertical: "middle" };
+
+      const logoSize = 90;
+      const averageColumnWidthPixels = 64;
+      const totalWidthPixels = totalColumns * averageColumnWidthPixels;
+      const logoStartPixelOffset = (totalWidthPixels - logoSize) / 2;
+      const logoStartCol = logoStartPixelOffset / averageColumnWidthPixels;
+
+      worksheet.addImage(imageId, {
+        tl: { col: logoStartCol, row: 0 },
+        ext: { width: logoSize, height: logoSize },
+        editAs: "oneCell",
+      });
+
+      worksheet.getRow(1).height = logoSize + 15;
+      logoRowOffset = 1;
+    } catch (logoError) {
+      console.log("Error loading research export logo in Excel:", logoError.message);
+    }
+  }
+
+  const headerStartRow = 1 + logoRowOffset;
+  const locationRow = headerStartRow + 1;
+  const contactRow = locationRow + 1;
+  const collegeRow = contactRow + 1;
+  const dividerRow = collegeRow + 1;
+  const reportTitleRow = dividerRow + 1;
+  const detailsRow = reportTitleRow + 1;
+  const filterRow = filtersSummary ? detailsRow + 1 : null;
+  const spacingRow = filterRow ? filterRow + 1 : detailsRow + 1;
+  const headerRowNum = spacingRow + 1;
+
+  worksheet.mergeCells(headerStartRow, 1, headerStartRow, totalColumns);
+  worksheet.getCell(headerStartRow, 1).value = "BUKIDNON STATE UNIVERSITY";
+  worksheet.getCell(headerStartRow, 1).font = { name: "Arial", size: 20, bold: true, color: { argb: "FF7C1D23" } };
+  worksheet.getCell(headerStartRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+  worksheet.getRow(headerStartRow).height = 25;
+
+  worksheet.mergeCells(locationRow, 1, locationRow, totalColumns);
+  worksheet.getCell(locationRow, 1).value = "Malaybalay City, Bukidnon 8700";
+  worksheet.getCell(locationRow, 1).font = { name: "Arial", size: 11, color: { argb: "FF374151" } };
+  worksheet.getCell(locationRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+  worksheet.getRow(locationRow).height = 18;
+
+  worksheet.mergeCells(contactRow, 1, contactRow, totalColumns);
+  worksheet.getCell(contactRow, 1).value = "Tel (088) 813-5661 to 5663; TeleFax (088) 813-2717, www.buksu.edu.ph";
+  worksheet.getCell(contactRow, 1).font = { name: "Arial", size: 11, color: { argb: "FF1E40AF" }, underline: true };
+  worksheet.getCell(contactRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+  worksheet.getRow(contactRow).height = 18;
+
+  worksheet.mergeCells(collegeRow, 1, collegeRow, totalColumns);
+  worksheet.getCell(collegeRow, 1).value = "College of Public Administration and Governance";
+  worksheet.getCell(collegeRow, 1).font = { name: "Arial", size: 13, color: { argb: "FF374151" } };
+  worksheet.getCell(collegeRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+  worksheet.getRow(collegeRow).height = 22;
+
+  worksheet.mergeCells(dividerRow, 1, dividerRow, totalColumns);
+  worksheet.getCell(dividerRow, 1).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF7C1D23" },
+  };
+  worksheet.getRow(dividerRow).height = 3;
+
+  worksheet.mergeCells(reportTitleRow, 1, reportTitleRow, totalColumns);
+  worksheet.getCell(reportTitleRow, 1).value = "RESEARCH RECORDS REPORT";
+  worksheet.getCell(reportTitleRow, 1).font = { name: "Arial", size: 16, bold: true, color: { argb: "FF111827" } };
+  worksheet.getCell(reportTitleRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+  worksheet.getRow(reportTitleRow).height = 24;
+
+  worksheet.mergeCells(detailsRow, 1, detailsRow, totalColumns);
+  worksheet.getCell(detailsRow, 1).value = `Generated by: ${generatedBy || "Program Head"} | Date Generated: ${formatDateValue(new Date(), true)} | Total Records: ${rows.length}`;
+  worksheet.getCell(detailsRow, 1).font = { name: "Arial", size: 11, color: { argb: "FF6B7280" } };
+  worksheet.getCell(detailsRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+  worksheet.getCell(detailsRow, 1).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFF3F4F6" },
+  };
+  worksheet.getCell(detailsRow, 1).border = {
+    top: { style: "thin", color: { argb: "FF000000" } },
+    bottom: { style: "thin", color: { argb: "FF000000" } },
+    left: { style: "thin", color: { argb: "FF000000" } },
+    right: { style: "thin", color: { argb: "FF000000" } },
+  };
+  worksheet.getRow(detailsRow).height = 20;
+
+  if (filterRow) {
+    worksheet.mergeCells(filterRow, 1, filterRow, totalColumns);
+    worksheet.getCell(filterRow, 1).value = `Applied Filters: ${filtersSummary}`;
+    worksheet.getCell(filterRow, 1).font = { name: "Arial", size: 11, italic: true, color: { argb: "FF9CA3AF" } };
+    worksheet.getCell(filterRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+    worksheet.getCell(filterRow, 1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFF3F4F6" },
+    };
+    worksheet.getCell(filterRow, 1).border = {
+      top: { style: "thin", color: { argb: "FF000000" } },
+      bottom: { style: "thin", color: { argb: "FF000000" } },
+      left: { style: "thin", color: { argb: "FF000000" } },
+      right: { style: "thin", color: { argb: "FF000000" } },
+    };
+    worksheet.getRow(filterRow).height = 18;
+  }
+
+  worksheet.getRow(spacingRow).height = 5;
+
+  const headerRow = worksheet.getRow(headerRowNum);
+  PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.forEach((column, index) => {
+    const cell = headerRow.getCell(index + 1);
+    cell.value = column.label;
+    cell.font = { name: "Arial", size: 12, bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF7C1D23" },
+    };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.border = {
+      top: { style: "medium", color: { argb: "FF7C1D23" } },
+      bottom: { style: "medium", color: { argb: "FF7C1D23" } },
+      left: { style: "thin", color: { argb: "FFFFFFFF" } },
+      right: { style: "thin", color: { argb: "FFFFFFFF" } },
+    };
+  });
+  headerRow.height = 30;
+
+  rows.forEach((record, index) => {
+    const row = worksheet.addRow(
+      PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS.reduce((acc, column) => {
+        acc[column.key] = record[column.key] ?? "N/A";
+        return acc;
+      }, {})
+    );
+
+    row.height = 25;
+    row.eachCell((cell, columnNumber) => {
+      const fieldName = PROGRAM_HEAD_RESEARCH_EXPORT_COLUMNS[columnNumber - 1]?.key;
+      const isTextField = ["title", "students", "adviser"].includes(fieldName);
+      cell.font = { name: "Arial", size: 11, color: { argb: "FF111827" } };
+      cell.alignment = {
+        horizontal: isTextField ? "left" : "center",
+        vertical: "middle",
+        wrapText: true,
+      };
+      cell.border = {
+        top: { style: "thin", color: { argb: "FF000000" } },
+        bottom: { style: "thin", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: index % 2 === 0 ? "FFFFFFFF" : "FFF9FAFB" },
+      };
+    });
+  });
+
+  worksheet.autoFilter = {
+    from: { row: headerRowNum, column: 1 },
+    to: { row: headerRowNum + rows.length, column: totalColumns },
+  };
+
+  worksheet.views = [{
+    state: "frozen",
+    ySplit: headerRowNum,
+    activeCell: `A${headerRowNum + 1}`,
+    showGridLines: true,
+  }];
+
+  const footerRow = worksheet.lastRow.number + 2;
+  const footerRow2 = footerRow + 1;
+  const signatureRow = footerRow2 + 1;
+
+  worksheet.mergeCells(footerRow, 1, footerRow, totalColumns);
+  worksheet.getCell(footerRow, 1).value = "This report is automatically generated by the Masteral Archive & Monitoring System.";
+  worksheet.getCell(footerRow, 1).font = { name: "Arial", size: 11, color: { argb: "FF6B7280" } };
+  worksheet.getCell(footerRow, 1).alignment = { vertical: "middle", horizontal: "center" };
+
+  worksheet.mergeCells(footerRow2, 1, footerRow2, totalColumns);
+  worksheet.getCell(footerRow2, 1).value = "Bukidnon State University - College of Public Administration and Governance";
+  worksheet.getCell(footerRow2, 1).font = { name: "Arial", size: 11, color: { argb: "FF9CA3AF" } };
+  worksheet.getCell(footerRow2, 1).alignment = { vertical: "middle", horizontal: "center" };
+
+  worksheet.getCell(signatureRow, 1).value = digitalSignature;
+  worksheet.getCell(signatureRow, 1).font = { name: "Arial", size: 10, color: { argb: "FF000000" } };
+  worksheet.getCell(signatureRow, 1).alignment = { vertical: "middle", horizontal: "left" };
+
+  return workbook.xlsx.writeBuffer();
+};
+
 // Generate HTML template for panel records PDF
 const generatePanelRecordsPdfHtmlTemplate = (panelData, { generatedBy, filtersSummary }) => {
   const digitalSignature = generatePanelDigitalSignature({
@@ -4442,6 +5420,993 @@ const generatePanelRecordsExcelBuffer = async (panelData, { generatedBy, filters
   return await workbook.xlsx.writeBuffer();
 };
 
+const generateMonitoringReportPdfHtmlTemplate = (panelData, { generatedBy, filtersSummary, stats }) => {
+  const digitalSignature = generatePanelDigitalSignature({
+    recordCount: panelData.length,
+    generatedBy,
+  });
+  const logoBase64 = getUniversityLogoBase64();
+
+  const tableRows = panelData.map((panel, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${escapeHtml(panel.name || "N/A")}</td>
+        <td>${escapeHtml(panel.research?.title || "N/A")}</td>
+        <td>${escapeHtml(panel.panelTypeLabel || "N/A")}</td>
+        <td>${escapeHtml(panel.panelStatusLabel || "N/A")}</td>
+        <td>${escapeHtml(panel.researchStageLabel || "N/A")}</td>
+        <td>${escapeHtml(panel.researchStatusLabel || "N/A")}</td>
+        <td>${escapeHtml(panel.totalActiveMembers || 0)}</td>
+        <td>${escapeHtml(`${panel.submittedReviewsCount || 0} / ${panel.totalActiveMembers || 0}`)}</td>
+        <td>${escapeHtml(`${panel.progress || 0}%`)}</td>
+        <td class="${panel.hasAlerts ? "alerts-cell" : ""}">${escapeHtml(
+          panel.hasAlerts
+            ? `${panel.overdueCount || 0} overdue, ${panel.missingCount || 0} missing`
+            : "No alerts"
+        )}</td>
+        <td class="panelists-cell">${escapeHtml(panel.activeMemberNames?.join(", ") || "N/A")}</td>
+      </tr>
+    `).join("");
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Process Monitoring Report</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    @page {
+      size: A4 landscape;
+      margin: 1cm;
+    }
+
+    body {
+      font-family: 'Helvetica', 'Arial', sans-serif;
+      font-size: 10px;
+      color: #111827;
+      line-height: 1.4;
+      background: #ffffff;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    .logo-container {
+      margin-bottom: 10px;
+    }
+
+    .logo-container img {
+      width: 90px;
+      height: 90px;
+      object-fit: contain;
+    }
+
+    .university-name {
+      font-size: 22px;
+      font-weight: bold;
+      color: #7C1D23;
+      margin-bottom: 5px;
+    }
+
+    .university-address {
+      font-size: 12px;
+      color: #374151;
+      margin-bottom: 3px;
+    }
+
+    .university-contact {
+      font-size: 10px;
+      color: #1E40AF;
+      margin-bottom: 8px;
+    }
+
+    .college-name {
+      font-size: 13px;
+      color: #374151;
+      margin-bottom: 10px;
+    }
+
+    .header-line {
+      border-top: 2px solid #7C1D23;
+      margin: 15px 0;
+    }
+
+    .report-title {
+      font-size: 16px;
+      font-weight: bold;
+      color: #111827;
+      text-align: center;
+      margin: 15px 0;
+    }
+
+    .filters-box {
+      background-color: #F9FAFB;
+      border: 1px solid #E5E7EB;
+      padding: 12px;
+      margin-bottom: 16px;
+      border-radius: 4px;
+    }
+
+    .filters-box p {
+      margin: 4px 0;
+      font-size: 10px;
+      color: #374151;
+    }
+
+    .summary-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 10px;
+      margin-bottom: 16px;
+      table-layout: fixed;
+    }
+
+    .summary-table td {
+      border: 1px solid #E5E7EB;
+      border-left-width: 6px;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #FFFFFF;
+      vertical-align: top;
+    }
+
+    .summary-table td.total { border-left-color: #2563EB; }
+    .summary-table td.pending { border-left-color: #D97706; }
+    .summary-table td.progress { border-left-color: #7C3AED; }
+    .summary-table td.alerts { border-left-color: #DC2626; }
+
+    .summary-label {
+      font-size: 9px;
+      font-weight: bold;
+      color: #6B7280;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .summary-value {
+      font-size: 20px;
+      font-weight: bold;
+      color: #111827;
+    }
+
+    .report {
+      width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+      font-size: 9px;
+    }
+
+    .report col.c1 { width: 3%; }
+    .report col.c2 { width: 10%; }
+    .report col.c3 { width: 18%; }
+    .report col.c4 { width: 9%; }
+    .report col.c5 { width: 9%; }
+    .report col.c6 { width: 9%; }
+    .report col.c7 { width: 9%; }
+    .report col.c8 { width: 6%; }
+    .report col.c9 { width: 8%; }
+    .report col.c10 { width: 6%; }
+    .report col.c11 { width: 10%; }
+    .report col.c12 { width: 13%; }
+
+    .report thead {
+      display: table-header-group;
+      background-color: #7C1D23;
+      color: #ffffff;
+    }
+
+    .report thead th {
+      padding: 8px 5px;
+      text-align: left;
+      font-weight: bold;
+      font-size: 8px;
+      border: 1px solid #5a1519;
+      white-space: normal;
+      word-wrap: break-word;
+      line-height: 1.3;
+    }
+
+    .report tbody tr {
+      page-break-inside: avoid;
+      border-bottom: 1px solid #E5E7EB;
+    }
+
+    .report tbody tr:nth-child(even) {
+      background-color: #F9FAFB;
+    }
+
+    .report tbody td {
+      padding: 6px 4px;
+      border: 1px solid #E5E7EB;
+      vertical-align: top;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .report tbody td.panelists-cell {
+      white-space: normal;
+      word-wrap: break-word;
+      overflow: visible;
+      text-overflow: clip;
+    }
+
+    .report tbody td.alerts-cell {
+      color: #DC2626;
+      font-weight: bold;
+      white-space: normal;
+    }
+
+    .footer {
+      margin-top: 30px;
+      padding-top: 15px;
+      border-top: 1px solid #E5E7EB;
+      text-align: center;
+      font-size: 8px;
+      color: #6B7280;
+    }
+
+    .footer p {
+      margin: 4px 0;
+    }
+
+    .footer .signature {
+      margin-top: 10px;
+      font-size: 8px;
+      color: #000000;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    ${logoBase64 ? `<div class="logo-container"><img src="${logoBase64}" alt="BUKSU Logo" /></div>` : ""}
+    <div class="university-name">BUKIDNON STATE UNIVERSITY</div>
+    <div class="university-address">Malaybalay City, Bukidnon 8700</div>
+    <div class="university-contact">Tel (088) 813-5661 to 5663; TeleFax (088) 813-2717, www.buksu.edu.ph</div>
+    <div class="college-name">College of Public Administration and Governance</div>
+    <div class="header-line"></div>
+  </div>
+
+  <div class="report-title">PANEL REVIEW PROCESS MONITORING REPORT</div>
+
+  <div class="filters-box">
+    <p><strong>Generated by:</strong> ${escapeHtml(generatedBy || "Program Head")}</p>
+    <p><strong>Date Generated:</strong> ${escapeHtml(formatDateValue(new Date(), true))}</p>
+    <p><strong>Total Records:</strong> ${panelData.length}</p>
+    <p><strong>Applied Filters:</strong> ${escapeHtml(filtersSummary || "All monitoring records")}</p>
+  </div>
+
+  <table class="summary-table">
+    <tr>
+      <td class="total">
+        <div class="summary-label">Total Panels</div>
+        <div class="summary-value">${escapeHtml(stats?.total || 0)}</div>
+      </td>
+      <td class="pending">
+        <div class="summary-label">Pending</div>
+        <div class="summary-value">${escapeHtml(stats?.pending || 0)}</div>
+      </td>
+      <td class="progress">
+        <div class="summary-label">In Progress</div>
+        <div class="summary-value">${escapeHtml(stats?.inProgress || 0)}</div>
+      </td>
+      <td class="alerts">
+        <div class="summary-label">Alerts</div>
+        <div class="summary-value">${escapeHtml(stats?.withAlerts || 0)}</div>
+      </td>
+    </tr>
+  </table>
+
+  <table class="report">
+    <colgroup>
+      <col class="c1">
+      <col class="c2">
+      <col class="c3">
+      <col class="c4">
+      <col class="c5">
+      <col class="c6">
+      <col class="c7">
+      <col class="c8">
+      <col class="c9">
+      <col class="c10">
+      <col class="c11">
+      <col class="c12">
+    </colgroup>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Panel Name</th>
+        <th>Research Title</th>
+        <th>Panel Type</th>
+        <th>Panel Status</th>
+        <th>Research Stage</th>
+        <th>Research Status</th>
+        <th>Active Panelists</th>
+        <th>Reviews Submitted</th>
+        <th>Progress</th>
+        <th>Alerts</th>
+        <th>Panelists</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${tableRows}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    <p>This report is automatically generated by the Masteral Archive & Monitoring System.</p>
+    <p>Bukidnon State University - College of Public Administration and Governance</p>
+    <div class="signature">${escapeHtml(digitalSignature)}</div>
+  </div>
+</body>
+</html>
+  `;
+};
+
+const generateMonitoringReportPdfBuffer = async (panelData, { generatedBy, filtersSummary, stats }) => {
+  const html = generateMonitoringReportPdfHtmlTemplate(panelData, {
+    generatedBy,
+    filtersSummary,
+    stats,
+  });
+
+  try {
+    const puppeteer = await import("puppeteer").catch(() => null);
+    if (puppeteer) {
+      const browser = await puppeteer.default.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: "networkidle0" });
+      const pdfBuffer = await page.pdf({
+        format: "A4",
+        landscape: true,
+        margin: {
+          top: "1cm",
+          right: "1cm",
+          bottom: "1cm",
+          left: "1cm",
+        },
+        printBackground: true,
+      });
+      await browser.close();
+      return pdfBuffer;
+    }
+  } catch (puppeteerError) {
+    console.log("Puppeteer not available for monitoring report, falling back:", puppeteerError.message);
+  }
+
+  try {
+    const pdf = await import("html-pdf").catch(() => null);
+    if (pdf) {
+      return new Promise((resolve, reject) => {
+        pdf.create(html, {
+          format: "A4",
+          orientation: "landscape",
+          border: {
+            top: "1cm",
+            right: "1cm",
+            bottom: "1cm",
+            left: "1cm",
+          },
+        }).toBuffer((err, buffer) => {
+          if (err) reject(err);
+          else resolve(buffer);
+        });
+      });
+    }
+  } catch (htmlPdfError) {
+    console.log("html-pdf not available for monitoring report, falling back:", htmlPdfError.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      margin: 40,
+      size: "A4",
+      bufferPages: true,
+    });
+
+    const chunks = [];
+    const digitalSignature = generatePanelDigitalSignature({
+      recordCount: panelData.length,
+      generatedBy,
+    });
+
+    const contentWidth = () => doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    const addPageHeader = () => {
+      doc.font("Helvetica-Bold")
+        .fontSize(18)
+        .fillColor("#7C1D23")
+        .text("Panel Review Process Monitoring Report", {
+          align: "center",
+        });
+
+      doc.moveDown(0.3);
+      doc.font("Helvetica")
+        .fontSize(10)
+        .fillColor("#4B5563")
+        .text(`Generated by: ${generatedBy || "Program Head"}`, { align: "center" })
+        .text(`Generated on: ${formatDateValue(new Date(), true)}`, { align: "center" });
+
+      doc.moveDown(0.6);
+      doc.moveTo(doc.page.margins.left, doc.y)
+        .lineTo(doc.page.width - doc.page.margins.right, doc.y)
+        .strokeColor("#D1D5DB")
+        .lineWidth(1)
+        .stroke();
+
+      doc.moveDown(0.8);
+    };
+
+    const drawStatCard = (x, y, width, title, value, accentColor) => {
+      doc.roundedRect(x, y, width, 55, 8)
+        .fillAndStroke("#F9FAFB", "#E5E7EB");
+
+      doc.rect(x, y, 6, 55)
+        .fill(accentColor);
+
+      doc.font("Helvetica-Bold")
+        .fontSize(9)
+        .fillColor("#6B7280")
+        .text(title, x + 14, y + 10, {
+          width: width - 24,
+        });
+
+      doc.fontSize(18)
+        .fillColor("#111827")
+        .text(String(value ?? 0), x + 14, y + 24, {
+          width: width - 24,
+        });
+    };
+
+    const ensurePageSpace = (requiredHeight) => {
+      if (doc.y + requiredHeight <= doc.page.height - doc.page.margins.bottom - 35) {
+        return;
+      }
+
+      doc.addPage();
+      addPageHeader();
+    };
+
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    addPageHeader();
+
+    const statsY = doc.y;
+    const cardGap = 10;
+    const cardWidth = (contentWidth() - cardGap) / 2;
+
+    drawStatCard(doc.page.margins.left, statsY, cardWidth, "Total Panels", stats?.total || 0, "#2563EB");
+    drawStatCard(doc.page.margins.left + cardWidth + cardGap, statsY, cardWidth, "Pending", stats?.pending || 0, "#D97706");
+    drawStatCard(doc.page.margins.left, statsY + 65, cardWidth, "In Progress", stats?.inProgress || 0, "#7C3AED");
+    drawStatCard(doc.page.margins.left + cardWidth + cardGap, statsY + 65, cardWidth, "Alerts", stats?.withAlerts || 0, "#DC2626");
+
+    doc.y = statsY + 140;
+
+    doc.roundedRect(doc.page.margins.left, doc.y, contentWidth(), filtersSummary ? 54 : 36, 8)
+      .fillAndStroke("#FEF2F2", "#FCA5A5");
+    doc.font("Helvetica-Bold")
+      .fontSize(10)
+      .fillColor("#7C1D23")
+      .text("Applied Filters", doc.page.margins.left + 12, doc.y + 10);
+    doc.font("Helvetica")
+      .fontSize(10)
+      .fillColor("#374151")
+      .text(filtersSummary || "All monitoring records", doc.page.margins.left + 12, doc.y + 24, {
+        width: contentWidth() - 24,
+      });
+
+    doc.moveDown(3.2);
+    doc.font("Helvetica-Bold")
+      .fontSize(12)
+      .fillColor("#111827")
+      .text("Panel Monitoring Details");
+    doc.moveDown(0.6);
+
+    panelData.forEach((panel, index) => {
+      const panelistsText = panel.activeMemberNames?.length
+        ? panel.activeMemberNames.join(", ")
+        : "N/A";
+      const alertsText = panel.hasAlerts
+        ? `${panel.overdueCount || 0} overdue, ${panel.missingCount || 0} missing`
+        : "No alerts";
+      const reviewText = `${panel.submittedReviewsCount || 0} of ${panel.totalActiveMembers || 0} submitted`;
+      const panelistsHeight = doc.heightOfString(panelistsText, {
+        width: contentWidth() - 24,
+      });
+      const boxHeight = Math.max(120, 104 + panelistsHeight);
+
+      ensurePageSpace(boxHeight + 18);
+
+      const boxY = doc.y;
+      const accentColor = panel.hasAlerts ? "#DC2626" : "#2563EB";
+
+      doc.roundedRect(doc.page.margins.left, boxY, contentWidth(), boxHeight, 8)
+        .fillAndStroke("#FFFFFF", "#E5E7EB");
+      doc.rect(doc.page.margins.left, boxY, 6, boxHeight)
+        .fill(accentColor);
+
+      doc.font("Helvetica-Bold")
+        .fontSize(12)
+        .fillColor("#111827")
+        .text(`${index + 1}. ${panel.name || "Untitled Panel"}`, doc.page.margins.left + 14, boxY + 10, {
+          width: contentWidth() - 28,
+        });
+
+      doc.font("Helvetica")
+        .fontSize(9)
+        .fillColor("#4B5563")
+        .text(`Research Title: ${panel.research?.title || "N/A"}`, doc.page.margins.left + 14, boxY + 30, {
+          width: contentWidth() - 28,
+        })
+        .text(`Panel Type: ${panel.panelTypeLabel || "N/A"}`, doc.page.margins.left + 14, boxY + 44, {
+          width: contentWidth() - 28,
+        })
+        .text(`Panel Status: ${panel.panelStatusLabel || "N/A"}`, doc.page.margins.left + 14, boxY + 58, {
+          width: contentWidth() - 28,
+        })
+        .text(`Research Stage: ${panel.researchStageLabel || "N/A"}`, doc.page.margins.left + 14, boxY + 72, {
+          width: contentWidth() - 28,
+        })
+        .text(`Research Status: ${panel.researchStatusLabel || "N/A"}`, doc.page.margins.left + 14, boxY + 86, {
+          width: contentWidth() - 28,
+        })
+        .text(`Reviews Submitted: ${reviewText}`, doc.page.margins.left + 14, boxY + 100, {
+          width: contentWidth() - 28,
+        })
+        .text(`Progress: ${panel.progress || 0}%`, doc.page.margins.left + 14, boxY + 114, {
+          width: contentWidth() - 28,
+        })
+        .text(`Alerts: ${alertsText}`, doc.page.margins.left + 14, boxY + 128, {
+          width: contentWidth() - 28,
+        })
+        .text(`Last Updated: ${panel.lastUpdated || "N/A"}`, doc.page.margins.left + 14, boxY + 142, {
+          width: contentWidth() - 28,
+        });
+
+      doc.font("Helvetica-Bold")
+        .fontSize(9)
+        .fillColor("#6B7280")
+        .text("Active Panelists:", doc.page.margins.left + 14, boxY + 160, {
+          width: contentWidth() - 28,
+        });
+      doc.font("Helvetica")
+        .fontSize(9)
+        .fillColor("#111827")
+        .text(panelistsText, doc.page.margins.left + 14, boxY + 174, {
+          width: contentWidth() - 28,
+        });
+
+      doc.y = boxY + boxHeight + 12;
+    });
+
+    ensurePageSpace(40);
+    doc.moveTo(doc.page.margins.left, doc.y)
+      .lineTo(doc.page.width - doc.page.margins.right, doc.y)
+      .strokeColor("#E5E7EB")
+      .lineWidth(1)
+      .stroke();
+    doc.moveDown(0.4);
+    doc.font("Helvetica")
+      .fontSize(8)
+      .fillColor("#6B7280")
+      .text("This report is automatically generated by the Masteral Archive & Monitoring System.", {
+        align: "center",
+      });
+
+    addPageNumbers(doc, digitalSignature);
+    doc.end();
+  });
+};
+
+const generateMonitoringReportExcelBuffer = async (panelData, { generatedBy, filtersSummary, stats }) => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = generatedBy || "Program Head";
+  workbook.created = new Date();
+
+  const worksheet = workbook.addWorksheet("Process Monitoring", {
+    properties: { defaultRowHeight: 20 },
+    pageSetup: {
+      fitToPage: true,
+      orientation: "landscape",
+      margins: { left: 0.7, right: 0.7, top: 0.75, bottom: 0.75, header: 0.3, footer: 0.3 },
+    },
+  });
+  worksheet.columns = [
+    { key: "index", width: 6 },
+    { key: "panelName", width: 24 },
+    { key: "researchTitle", width: 34 },
+    { key: "panelType", width: 18 },
+    { key: "panelStatus", width: 16 },
+    { key: "researchStage", width: 16 },
+    { key: "researchStatus", width: 18 },
+    { key: "activePanelists", width: 14 },
+    { key: "reviewsSubmitted", width: 18 },
+    { key: "progress", width: 12 },
+    { key: "alerts", width: 22 },
+    { key: "panelists", width: 42 },
+  ];
+  const totalColumns = worksheet.columns.length;
+
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const projectRoot = path.resolve(__dirname, "..", "..");
+  const logoPaths = [
+    path.join(projectRoot, "frontend", "public", "logo.jpg"),
+    path.join(projectRoot, "frontend", "public", "logo.png"),
+    path.join(projectRoot, "public", "logo.jpg"),
+    path.join(projectRoot, "public", "logo.png"),
+    path.join(projectRoot, "backend", "public", "logo.jpg"),
+    path.join(projectRoot, "backend", "public", "logo.png"),
+    path.join(process.cwd(), "frontend", "public", "logo.jpg"),
+    path.join(process.cwd(), "frontend", "public", "logo.png"),
+  ];
+
+  let logoRowOffset = 0;
+  const logoSize = 90;
+
+  for (const logoPath of logoPaths) {
+    if (!fs.existsSync(logoPath)) {
+      continue;
+    }
+
+    try {
+      const ext = path.extname(logoPath).substring(1).toLowerCase();
+      if (!["jpg", "jpeg", "png", "gif"].includes(ext)) {
+        continue;
+      }
+
+      const imageId = workbook.addImage({
+        filename: logoPath,
+        extension: ext,
+      });
+
+      worksheet.mergeCells(1, 1, 1, totalColumns);
+      worksheet.getCell(1, 1).alignment = { horizontal: "center", vertical: "middle" };
+
+      const averageColumnWidthPixels = 64;
+      const totalWidthPixels = totalColumns * averageColumnWidthPixels;
+      const logoStartPixelOffset = (totalWidthPixels - logoSize) / 2;
+      const logoStartCol = logoStartPixelOffset / averageColumnWidthPixels;
+
+      worksheet.addImage(imageId, {
+        tl: { col: logoStartCol, row: 0 },
+        ext: { width: logoSize, height: logoSize },
+        editAs: "oneCell",
+      });
+
+      worksheet.getRow(1).height = logoSize + 15;
+      logoRowOffset = 1;
+      break;
+    } catch (logoError) {
+      console.log("Error loading logo in monitoring Excel:", logoError.message);
+    }
+  }
+
+  const titleRowIndex = 1 + logoRowOffset;
+  const generatedRowIndex = 2 + logoRowOffset;
+  const filtersRowIndex = 4 + logoRowOffset;
+  const summaryRowIndex = 6 + logoRowOffset;
+  const headerRowIndex = 9 + logoRowOffset;
+
+  worksheet.mergeCells(titleRowIndex, 1, titleRowIndex, totalColumns);
+  worksheet.getCell(titleRowIndex, 1).value = "Panel Review Process Monitoring Report";
+  worksheet.getCell(titleRowIndex, 1).font = { bold: true, size: 16, color: { argb: "FF7C1D23" } };
+  worksheet.getCell(titleRowIndex, 1).alignment = { horizontal: "center" };
+
+  worksheet.mergeCells(generatedRowIndex, 1, generatedRowIndex, totalColumns);
+  worksheet.getCell(generatedRowIndex, 1).value = `Generated by: ${generatedBy || "Program Head"} | Generated on: ${formatDateValue(new Date(), true)}`;
+  worksheet.getCell(generatedRowIndex, 1).font = { size: 10, color: { argb: "FF4B5563" } };
+  worksheet.getCell(generatedRowIndex, 1).alignment = { horizontal: "center" };
+
+  worksheet.mergeCells(filtersRowIndex, 1, filtersRowIndex, totalColumns);
+  worksheet.getCell(filtersRowIndex, 1).value = `Applied Filters: ${filtersSummary || "All monitoring records"}`;
+  worksheet.getCell(filtersRowIndex, 1).font = { italic: true, color: { argb: "FF7C1D23" } };
+  worksheet.getCell(filtersRowIndex, 1).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFFEF2F2" },
+  };
+
+  const summaryHeaders = [
+    { column: 1, label: "Total Panels", value: stats?.total || 0, color: "FF2563EB" },
+    { column: 4, label: "Pending", value: stats?.pending || 0, color: "FFD97706" },
+    { column: 7, label: "In Progress", value: stats?.inProgress || 0, color: "FF7C3AED" },
+    { column: 10, label: "Alerts", value: stats?.withAlerts || 0, color: "FFDC2626" },
+  ];
+
+  summaryHeaders.forEach(({ column, label, value, color }) => {
+    const labelCell = worksheet.getCell(summaryRowIndex, column);
+    labelCell.value = label;
+    labelCell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    labelCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: color },
+    };
+    labelCell.alignment = { horizontal: "center" };
+
+    const numericCell = worksheet.getCell(summaryRowIndex, column + 1);
+    numericCell.value = value;
+    numericCell.font = { bold: true, size: 14 };
+    numericCell.alignment = { horizontal: "center" };
+    worksheet.mergeCells(summaryRowIndex, column + 1, summaryRowIndex, column + 2);
+  });
+
+  const headerLabels = [
+    "#",
+    "Panel Name",
+    "Research Title",
+    "Panel Type",
+    "Panel Status",
+    "Research Stage",
+    "Research Status",
+    "Active Panelists",
+    "Reviews Submitted",
+    "Progress",
+    "Alerts",
+    "Panelists",
+  ];
+
+  const headerRow = worksheet.getRow(headerRowIndex);
+  headerLabels.forEach((label, index) => {
+    const cell = headerRow.getCell(index + 1);
+    cell.value = label;
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF7C1D23" },
+    };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  });
+  headerRow.height = 26;
+
+  panelData.forEach((panel, index) => {
+    const row = worksheet.addRow({
+      index: index + 1,
+      panelName: panel.name || "N/A",
+      researchTitle: panel.research?.title || "N/A",
+      panelType: panel.panelTypeLabel || "N/A",
+      panelStatus: panel.panelStatusLabel || "N/A",
+      researchStage: panel.researchStageLabel || "N/A",
+      researchStatus: panel.researchStatusLabel || "N/A",
+      activePanelists: panel.totalActiveMembers || 0,
+      reviewsSubmitted: `${panel.submittedReviewsCount || 0} / ${panel.totalActiveMembers || 0}`,
+      progress: `${panel.progress || 0}%`,
+      alerts: panel.hasAlerts ? `${panel.overdueCount || 0} overdue, ${panel.missingCount || 0} missing` : "No alerts",
+      panelists: panel.activeMemberNames?.join(", ") || "N/A",
+    });
+
+    row.alignment = { vertical: "middle", wrapText: true };
+    row.height = 24;
+
+    if (index % 2 === 0) {
+      row.eachCell((cell) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFF9FAFB" },
+        };
+      });
+    }
+
+    if (panel.hasAlerts) {
+      row.getCell(11).font = { color: { argb: "FFDC2626" }, bold: true };
+    }
+  });
+
+  worksheet.views = [{ state: "frozen", ySplit: headerRowIndex }];
+
+  return workbook.xlsx.writeBuffer();
+};
+
+export const exportPanelMonitoringReport = async (req, res) => {
+  const requestedFormat = req.body?.format === "xlsx" ? "xlsx" : "pdf";
+  let tempDirPath = null;
+
+  try {
+    const filters = req.body?.filters || {};
+    const panelData = await getPanelMonitoringData(filters, { persistProgress: false });
+
+    if (!panelData.length) {
+      return res.status(400).json({
+        message: "No monitoring records found matching the selected filters.",
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user || !user.driveAccessToken) {
+      return res.status(400).json({
+        message: "Please connect your Google Drive account in Settings before exporting process monitoring reports.",
+      });
+    }
+
+    const generatedBy = user?.name || user?.email || "Program Head";
+    const filtersSummary = Object.entries(filters)
+      .filter(([, value]) => value && value !== "all")
+      .map(([key, value]) => `${key}: ${value}`)
+      .join(", ");
+    const stats = getPanelMonitoringStats(panelData);
+
+    const fileBuffer = requestedFormat === "xlsx"
+      ? await generateMonitoringReportExcelBuffer(panelData, { generatedBy, filtersSummary, stats })
+      : await generateMonitoringReportPdfBuffer(panelData, { generatedBy, filtersSummary, stats });
+
+    const normalizedBuffer = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(fileBuffer);
+    const mimeType = requestedFormat === "xlsx"
+      ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      : "application/pdf";
+    const fileName = `process-monitoring-report-${new Date().toISOString().replace(/[:.]/g, "-")}.${requestedFormat}`;
+
+    tempDirPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), "process-monitoring-export-"));
+    const tempFilePath = path.join(tempDirPath, fileName);
+    await fs.promises.writeFile(tempFilePath, normalizedBuffer);
+
+    const driveTokens = buildDriveTokens(user);
+    if (!driveTokens?.access_token) {
+      throw new Error("Unable to read Google Drive credentials. Please reconnect your Drive account.");
+    }
+
+    const reportsFolderId = getProgramHeadPanelReportFolderId();
+    if (!reportsFolderId) {
+      throw new Error("Panel folder ID is not configured. Please set GOOGLE_DRIVE_PROGRAM_HEAD_PANEL_FOLDER_ID.");
+    }
+
+    let driveFile = null;
+    let driveUploadError = null;
+
+    try {
+      const { file, tokens: updatedTokens } = await uploadFileToDrive(
+        tempFilePath,
+        fileName,
+        mimeType,
+        driveTokens,
+        { parentFolderId: reportsFolderId, userId: user._id.toString() }
+      );
+
+      if (!file || !file.id) {
+        throw new Error("Upload succeeded but did not return a valid file ID.");
+      }
+
+      driveFile = file;
+      await applyUpdatedDriveTokens(user, updatedTokens);
+    } catch (driveError) {
+      driveUploadError = driveError;
+
+      if (
+        driveError.name === "OutboundRateLimitError" ||
+        driveError.message?.includes("rate limit") ||
+        driveError.message?.includes("Too many requests")
+      ) {
+        console.error("[Export Monitoring Report] Google Drive rate limit:", driveError.message);
+      } else if (
+        driveError.response?.data?.error === "invalid_grant" ||
+        driveError.message?.includes("invalid_grant")
+      ) {
+        user.driveAccessToken = undefined;
+        user.driveRefreshToken = undefined;
+        user.driveTokenExpiry = undefined;
+        await user.save();
+      } else {
+        console.error("[Export Monitoring Report] Drive upload failed:", driveError);
+      }
+    }
+
+    let exportRecord = null;
+    try {
+      exportRecord = await Export.create({
+        exportedBy: req.user.id,
+        format: requestedFormat,
+        recordCount: panelData.length,
+        selectedFields: [],
+        filters: {
+          status: filters.status || undefined,
+          startDate: filters.startDate ? new Date(filters.startDate) : undefined,
+          endDate: filters.endDate ? new Date(filters.endDate) : undefined,
+        },
+        driveFileId: driveFile?.id || undefined,
+        driveFileLink: driveFile?.webViewLink || undefined,
+        driveFileName: driveFile?.name || undefined,
+        driveFolderId: reportsFolderId || undefined,
+        fileName,
+        fileSize: normalizedBuffer.length,
+        mimeType,
+        status: "completed",
+      });
+    } catch (saveError) {
+      console.error("Error saving monitoring export record:", saveError);
+    }
+
+    await Activity.create({
+      user: req.user.id,
+      action: "export",
+      entityType: "panel",
+      entityName: "Process Monitoring Report",
+      description: `Exported ${panelData.length} monitoring record(s) as ${requestedFormat.toUpperCase()}`,
+      metadata: {
+        format: requestedFormat,
+        recordCount: panelData.length,
+        filters: filtersSummary || null,
+        driveFileId: driveFile?.id,
+        exportId: exportRecord?._id || null,
+      },
+    }).catch((activityError) => console.error("Error logging monitoring export activity:", activityError));
+
+    try {
+      await fs.promises.unlink(tempFilePath);
+      await fs.promises.rm(tempDirPath, { recursive: true, force: true });
+      tempDirPath = null;
+    } catch (cleanupError) {
+      console.error("Error cleaning up monitoring export temp files:", cleanupError);
+    }
+
+    const exportedAs = requestedFormat === "xlsx" ? "Excel" : "PDF";
+    const driveFolderLink = reportsFolderId
+      ? `https://drive.google.com/drive/folders/${reportsFolderId}`
+      : null;
+    const message = driveFile
+      ? `Process monitoring report exported as ${exportedAs} and saved to the configured Google Drive Panel folder.`
+      : driveUploadError?.name === "OutboundRateLimitError" || driveUploadError?.message?.includes("rate limit")
+        ? `Process monitoring report generated as ${exportedAs}, but upload to Google Drive was rate-limited. Please wait 1 minute and try again.`
+        : `Process monitoring report generated as ${exportedAs}, but failed to upload to Google Drive (${driveUploadError?.message || "unknown error"}).`;
+
+    res.json({
+      success: true,
+      hasWarning: !driveFile,
+      message,
+      format: requestedFormat,
+      recordCount: panelData.length,
+      driveFile,
+      driveFolderId: reportsFolderId || null,
+      driveFolderLink,
+      filters: filtersSummary || null,
+      exportId: exportRecord?._id || null,
+    });
+  } catch (error) {
+    console.error("Error exporting process monitoring report:", error);
+
+    if (tempDirPath) {
+      try {
+        await fs.promises.rm(tempDirPath, { recursive: true, force: true });
+      } catch (cleanupError) {
+        console.error("Error cleaning up failed monitoring export temp directory:", cleanupError);
+      }
+    }
+
+    try {
+      await Export.create({
+        exportedBy: req.user.id,
+        format: requestedFormat,
+        recordCount: 0,
+        selectedFields: [],
+        filters: req.body?.filters || {},
+        fileName: `failed-process-monitoring-report-${new Date().toISOString().replace(/[:.]/g, "-")}.${requestedFormat}`,
+        status: "failed",
+        errorMessage: error.message,
+      });
+    } catch (saveError) {
+      console.error("Error saving failed monitoring export record:", saveError);
+    }
+
+    res.status(500).json({ message: error.message || "Failed to export process monitoring report." });
+  }
+};
+
 export const exportPanelRecords = async (req, res) => {
   // Write to file to confirm function is called
   try {
@@ -5047,6 +7012,9 @@ export const exportPanelRecords = async (req, res) => {
     });
     
     const exportedAs = format === "excel" || format === "xlsx" ? "Excel" : "PDF";
+    const driveFolderLink = reportsFolderId
+      ? `https://drive.google.com/drive/folders/${reportsFolderId}`
+      : null;
     const responseMessage = driveFile
       ? `Panel records exported as ${exportedAs} and saved to your Google Drive Panel folder.`
       : driveUploadError?.name === "OutboundRateLimitError" || driveUploadError?.message?.includes("rate limit")
@@ -5063,6 +7031,8 @@ export const exportPanelRecords = async (req, res) => {
       format: "pdf",
       recordCount: panelData.length,
       driveFile,
+      driveFolderId: reportsFolderId || null,
+      driveFolderLink,
       filters: filtersSummary || null,
       exportId: exportRecord?._id || null
     });
@@ -5667,6 +7637,8 @@ export const exportDefenseSchedule = async (req, res) => {
       format: "xlsx",
       recordCount: schedules.length,
       driveFile,
+      driveFolderId: reportsFolderId || null,
+      driveFolderLink: reportsFolderId ? `https://drive.google.com/drive/folders/${reportsFolderId}` : null,
       exportId: exportRecord?._id || null
     });
   } catch (error) {
@@ -6848,6 +8820,11 @@ export const finalizeResearch = async (req, res) => {
 
     if (!research) {
       return res.status(404).json({ message: "Research not found" });
+    }
+
+    // Only allow finalization when adviser progress is exactly 100%
+    if (Number(research.progress) !== 100) {
+      return res.status(400).json({ message: "Research can only be finalized when progress is 100%." });
     }
 
     // Prevent re-finalization

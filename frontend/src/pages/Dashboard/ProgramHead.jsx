@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { FaUsersCog, FaCalendarAlt, FaClipboardCheck, FaChartLine, FaFileAlt, FaBell, FaSignOutAlt, FaBars, FaTimes as FaClose, FaUpload, FaDownload, FaTrash, FaHistory, FaFilePdf, FaFileWord, FaSearch, FaCheck, FaUsers, FaEdit, FaChartBar, FaClock, FaMapMarkerAlt, FaExclamationTriangle, FaCog, FaTimes } from "react-icons/fa";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
-import { showSuccess, showError, showWarning, showConfirm, showDangerConfirm } from "../../utils/sweetAlert";
+import { showSuccess, showDriveExportSuccess, showError, showWarning, showConfirm, showDangerConfirm } from "../../utils/sweetAlert";
 import { checkPermission } from "../../utils/permissionChecker";
 import { Calendar, momentLocalizer } from 'react-big-calendar';
 import moment from 'moment';
@@ -2181,9 +2181,13 @@ const ScheduleManagement = () => {
           res.data.message || `Defense schedule exported but failed to upload to Google Drive.`
         );
       } else {
-        await showSuccess(
+        await showDriveExportSuccess(
           'Export Successful',
-          res.data.message || `Defense schedule exported as Excel and saved to your Google Drive Reports folder.`
+          res.data.message || `Defense schedule exported as Excel and saved to your Google Drive Reports folder.`,
+          {
+            driveFileLink: res.data.driveFile?.webViewLink,
+            driveFolderLink: res.data.driveFolderLink,
+          }
         );
       }
     } catch (error) {
@@ -3127,11 +3131,17 @@ const ProcessMonitoring = () => {
     endDate: '',
   });
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [exportingReport, setExportingReport] = useState(false);
+  const [reportFormat, setReportFormat] = useState('pdf');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
 
   useEffect(() => {
     fetchPanels();
+  }, [filters]);
+
+  useEffect(() => {
+    setCurrentPage(1);
   }, [filters]);
 
   const fetchPanels = async () => {
@@ -3167,6 +3177,91 @@ const ProcessMonitoring = () => {
     }
   };
 
+  const getExportFilters = () => {
+    const exportFilters = {
+      status: filters.status !== 'all' ? filters.status : undefined,
+      startDate: filters.startDate || undefined,
+      endDate: filters.endDate || undefined,
+    };
+
+    Object.keys(exportFilters).forEach((key) => {
+      if (exportFilters[key] === undefined) {
+        delete exportFilters[key];
+      }
+    });
+
+    return exportFilters;
+  };
+
+  const handleGenerateReport = async () => {
+    const hasPermission = await checkPermission(
+      ['export_activity'],
+      'Generate Process Monitoring Report',
+      'You will not be able to export process monitoring reports.'
+    );
+    if (!hasPermission) {
+      return;
+    }
+
+    if (!panels.length) {
+      showWarning('No Data to Report', 'There are no monitoring records matching the current filters.');
+      return;
+    }
+
+    let driveConnected = false;
+    try {
+      const token = localStorage.getItem('token');
+      const driveRes = await axios.get('/api/google-drive/status', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      driveConnected = driveRes.data?.connected || false;
+    } catch (error) {
+      console.error('Error checking drive status:', error);
+    }
+
+    if (!driveConnected) {
+      showWarning('Google Drive Not Connected', 'Please connect your Google Drive account in Settings before exporting.');
+      return;
+    }
+
+    setExportingReport(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        '/api/programhead/panels/monitoring/export',
+        {
+          filters: getExportFilters(),
+          format: reportFormat,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (response.data.hasWarning) {
+        await showWarning(
+          'Export Completed with Warning',
+          response.data.message || `Process monitoring report generated as ${reportFormat.toUpperCase()}, but failed to upload to Google Drive.`
+        );
+      } else {
+        await showDriveExportSuccess(
+          'Export Successful',
+          response.data.message || `Process monitoring report exported as ${reportFormat.toUpperCase()} and saved to Google Drive.`,
+          {
+            driveFileLink: response.data.driveFile?.webViewLink,
+            driveFolderLink: response.data.driveFolderLink,
+          }
+        );
+      }
+    } catch (error) {
+      console.error('Error exporting process monitoring report:', error);
+      const errorMessage = error.response?.data?.message || 'Failed to generate the process monitoring report. Please try again.';
+      showError('Export Failed', errorMessage);
+    } finally {
+      setExportingReport(false);
+    }
+  };
+
   const getStatusColor = (status) => {
     const colors = {
       pending: 'bg-yellow-100 text-yellow-800 border-yellow-300',
@@ -3189,8 +3284,33 @@ const ProcessMonitoring = () => {
     <div className="space-y-6">
       {/* Header */}
       <div className="bg-white border border-gray-200 rounded-lg p-5">
-        <h2 className="text-xl font-bold text-gray-800 mb-2">Panel Review Process Monitoring</h2>
-        <p className="text-sm text-gray-600">Track panel review progress and intervene when necessary</p>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-gray-800 mb-2">Panel Review Process Monitoring</h2>
+            <p className="text-sm text-gray-600">Track panel review progress and intervene when necessary</p>
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Report Format</label>
+              <select
+                value={reportFormat}
+                onChange={(e) => setReportFormat(e.target.value)}
+                className="w-full sm:w-40 px-3 py-2 rounded-md border border-gray-300 text-sm"
+              >
+                <option value="pdf">PDF</option>
+                <option value="xlsx">Excel</option>
+              </select>
+            </div>
+            <button
+              onClick={handleGenerateReport}
+              disabled={exportingReport || loading}
+              className="flex items-center justify-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+            >
+              <FaDownload className="mr-2" />
+              {exportingReport ? 'Generating...' : 'Generate Report'}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Stats Cards */}
@@ -3617,10 +3737,11 @@ const ProcessMonitoring = () => {
                     </p>
                   )}
 
-                  {/* Manual Override Buttons */}
-                  <div>
-                    <p className="text-xs text-gray-500 mb-2">Set / Override Final Decision:</p>
-                    <div className="flex flex-wrap gap-2">
+                  {/* Manual Decision Buttons - only needed for ties */}
+                  {(panelDetails.panel.research.panelDecision === 'tie' || !panelDetails.panel.research.panelDecision) && (
+                    <div>
+                      <p className="text-xs text-gray-500 mb-2">Set Final Decision:</p>
+                      <div className="flex flex-wrap gap-2">
                       {['approved', 'rejected', 'for-revision'].map(dec => (
                         <button
                           key={dec}
@@ -3661,8 +3782,9 @@ const ProcessMonitoring = () => {
                           {panelDetails.panel.research.panelDecision === dec && ' ✓'}
                         </button>
                       ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               )}
 
@@ -5307,6 +5429,9 @@ const FacultyAdviserAssignment = () => {
 const ResearchRecords = () => {
   const [researchRecords, setResearchRecords] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportFormat, setExportFormat] = useState('pdf');
+  const [exporting, setExporting] = useState(false);
   const [showFinalizeModal, setShowFinalizeModal] = useState(false);
   const [selectedResearch, setSelectedResearch] = useState(null);
   const [finalizeForm, setFinalizeForm] = useState({
@@ -5474,6 +5599,7 @@ const ResearchRecords = () => {
     { label: 'Pending', value: 'pending', color: 'bg-yellow-100 text-yellow-700', activeColor: 'bg-yellow-500 text-white' },
     { label: 'Shared with Dean', value: 'shared_with_dean', color: 'bg-blue-100 text-blue-700', activeColor: 'bg-blue-600 text-white' },
     { label: 'Dean Approved', value: 'approved', color: 'bg-green-100 text-green-700', activeColor: 'bg-green-600 text-white' },
+    { label: 'For Revision', value: 'for-revision', color: 'bg-orange-100 text-orange-700', activeColor: 'bg-orange-500 text-white' },
     { label: 'Ready to Finalize', value: 'ready', color: 'bg-orange-100 text-orange-700', activeColor: 'bg-orange-500 text-white' },
     { label: 'Rejected', value: 'rejected', color: 'bg-red-100 text-red-700', activeColor: 'bg-red-600 text-white' },
     { label: 'Finalized', value: 'finalized', color: 'bg-purple-100 text-purple-700', activeColor: 'bg-purple-600 text-white' },
@@ -5481,8 +5607,9 @@ const ResearchRecords = () => {
 
   const getStatusLabel = (research) => {
     if (research.finalizedDate) return 'finalized';
+    if (research.status === 'for-revision') return 'for-revision';
     if (research.progress === 100) return 'ready';
-    if (research.sharedWithDean && research.status !== 'approved' && research.status !== 'rejected') return 'shared_with_dean';
+    if (research.sharedWithDean && !['approved', 'rejected', 'for-revision'].includes(research.status)) return 'shared_with_dean';
     return research.status;
   };
 
@@ -5497,6 +5624,7 @@ const ResearchRecords = () => {
       ready: 'bg-orange-100 text-orange-700',
       shared_with_dean: 'bg-blue-100 text-blue-700',
       approved: 'bg-green-100 text-green-700',
+      'for-revision': 'bg-orange-100 text-orange-700',
       rejected: 'bg-red-100 text-red-700',
       completed: 'bg-teal-100 text-teal-700',
       'in-progress': 'bg-blue-100 text-blue-700',
@@ -5507,6 +5635,7 @@ const ResearchRecords = () => {
       ready: 'Ready to Finalize',
       shared_with_dean: 'Shared with Dean',
       approved: 'Dean Approved',
+      'for-revision': 'For Revision',
       rejected: 'Rejected',
       completed: 'Completed',
       'in-progress': 'In Progress',
@@ -5515,13 +5644,91 @@ const ResearchRecords = () => {
     return { cls: map[label] || 'bg-gray-100 text-gray-700', text: text[label] || label };
   };
 
+  const handleExportResearchRecords = async () => {
+    if (!filteredResearch.length) {
+      showWarning('No Data to Export', 'There are no research records matching the current filter.');
+      return;
+    }
+
+    let driveConnected = false;
+    try {
+      const token = localStorage.getItem('token');
+      const driveRes = await axios.get('/api/google-drive/status', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      driveConnected = driveRes.data?.connected || false;
+    } catch (error) {
+      console.error('Error checking drive status:', error);
+    }
+
+    if (!driveConnected) {
+      showWarning('Google Drive Not Connected', 'Please connect your Google Drive account in Settings before exporting.');
+      return;
+    }
+
+    setExporting(true);
+    try {
+      const token = localStorage.getItem('token');
+      const filters = {
+        status: researchFilter !== 'all' && !['ready', 'finalized', 'shared_with_dean'].includes(researchFilter)
+          ? researchFilter
+          : undefined,
+        progress: researchFilter === 'ready' ? 100 : undefined,
+        finalized: researchFilter === 'finalized' ? true : undefined,
+        sharedWithDean: researchFilter === 'shared_with_dean' ? true : undefined,
+      };
+
+      Object.keys(filters).forEach((key) => filters[key] === undefined && delete filters[key]);
+
+      const res = await axios.post(
+        '/api/programhead/research/export',
+        { format: exportFormat, filters },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (res.data?.hasWarning) {
+        await showWarning(
+          'Export Completed with Warning',
+          res.data?.message || 'Research records were exported but could not be uploaded to Google Drive.'
+        );
+      } else {
+        await showDriveExportSuccess(
+          'Export Successful',
+          res.data?.message || `Research records exported as ${exportFormat.toUpperCase()} and saved to your Google Drive Reports folder.`,
+          {
+            driveFileLink: res.data?.driveFile?.webViewLink,
+            driveFolderLink: res.data?.driveFolderLink,
+          }
+        );
+      }
+
+      setShowExportModal(false);
+    } catch (error) {
+      const errorMessage = error?.response?.data?.message || 'Failed to export research records. Please try again.';
+      showError('Export Failed', errorMessage);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex justify-between items-center">
         <h2 className="text-xl font-bold text-gray-800">Research Records Management</h2>
-        <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
-          {activeResearch.length} Total Records
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium">
+            {activeResearch.length} Total Records
+          </span>
+          <button
+            onClick={() => setShowExportModal(true)}
+            disabled={filteredResearch.length === 0}
+            className="px-4 py-2 bg-[#7C1D23] text-white rounded-md hover:bg-[#5a1519] transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex items-center gap-2"
+            title="Export Research Records"
+          >
+            <FaDownload className="h-4 w-4" />
+            Export PDF/Excel
+          </button>
+        </div>
       </div>
 
       {/* Status Filter Tabs */}
@@ -5629,8 +5836,8 @@ const ResearchRecords = () => {
                         Share with Dean
                       </button>
                     )}
-                    {/* Finalize — when adviser sets progress to 100% OR Dean approves */}
-                    {(statusKey === 'ready' || statusKey === 'approved') && !research.finalizedDate && (
+                    {/* Finalize — only when adviser sets progress to 100% */}
+                    {statusKey === 'ready' && !research.finalizedDate && (
                       <button
                         onClick={() => handleFinalizeResearch(research)}
                         disabled={loading || finalizing}
@@ -5684,7 +5891,7 @@ const ResearchRecords = () => {
       {/* Summary Statistics */}
       <div className="bg-gray-50 rounded-lg border border-gray-200 p-5">
         <h3 className="text-base font-semibold text-gray-800 mb-4">Research Records Summary</h3>
-        <div className="grid grid-cols-2 md:grid-cols-7 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-8 gap-4">
           <div className="bg-white rounded-lg p-4 text-center border border-gray-200">
             <p className="text-2xl font-bold text-yellow-600">
               {activeResearch.filter(r => getStatusLabel(r) === 'pending').length}
@@ -5702,6 +5909,12 @@ const ResearchRecords = () => {
               {activeResearch.filter(r => getStatusLabel(r) === 'approved').length}
             </p>
             <p className="text-xs text-gray-600 mt-1 uppercase font-semibold">Dean Approved</p>
+          </div>
+          <div className="bg-white rounded-lg p-4 text-center border border-orange-200 bg-orange-50">
+            <p className="text-2xl font-bold text-orange-600">
+              {activeResearch.filter(r => getStatusLabel(r) === 'for-revision').length}
+            </p>
+            <p className="text-xs text-gray-600 mt-1 uppercase font-semibold">For Revision</p>
           </div>
           <div className="bg-white rounded-lg p-4 text-center border border-orange-200 bg-orange-50">
             <p className="text-2xl font-bold text-orange-600">
@@ -5871,6 +6084,74 @@ const ResearchRecords = () => {
           </div>
         </div>
       )}
+
+      {/* Export Research Records Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6">
+          <div className="bg-white rounded-lg shadow-2xl max-w-xl w-full">
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <h3 className="text-lg font-semibold text-gray-900">Export Research Records</h3>
+              <button
+                type="button"
+                onClick={() => setShowExportModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <FaClose className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-5 py-6 space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Export Format</label>
+                <div className="flex gap-6">
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input
+                      type="radio"
+                      name="research-export-format"
+                      value="pdf"
+                      checked={exportFormat === 'pdf'}
+                      onChange={() => setExportFormat('pdf')}
+                    />
+                    PDF
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input
+                      type="radio"
+                      name="research-export-format"
+                      value="xlsx"
+                      checked={exportFormat === 'xlsx'}
+                      onChange={() => setExportFormat('xlsx')}
+                    />
+                    Excel (.xlsx)
+                  </label>
+                </div>
+              </div>
+
+              <div className="rounded-md border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                Export scope: <span className="font-semibold">{researchFilter === 'all' ? 'All research records' : statusFilters.find(f => f.value === researchFilter)?.label || 'Filtered records'}</span>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 border-t border-gray-200 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowExportModal(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportResearchRecords}
+                  disabled={exporting}
+                  className="px-4 py-2 text-sm font-semibold text-white bg-[#7C1D23] rounded-md hover:bg-[#5a1519] disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {exporting ? 'Exporting...' : 'Save to Drive'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -5987,9 +6268,13 @@ const PanelRecords = () => {
           res.data.message || `Panel records exported but failed to upload to Google Drive.`
         );
       } else {
-        await showSuccess(
+        await showDriveExportSuccess(
           'Export Successful',
-          res.data.message || `Panel records exported as PDF and saved to your Google Drive Reports folder.`
+          res.data.message || `Panel records exported as PDF and saved to your Google Drive Reports folder.`,
+          {
+            driveFileLink: res.data.driveFile?.webViewLink,
+            driveFolderLink: res.data.driveFolderLink,
+          }
         );
       }
     } catch (error) {

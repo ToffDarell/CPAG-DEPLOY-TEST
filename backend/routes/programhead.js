@@ -25,6 +25,7 @@ import {
   getProcessMonitoring,
   uploadForm,
   getResearchRecords,
+  exportResearchRecords,
   getAvailableAdvisers,
   assignAdviser,
   removeAdviser,
@@ -46,6 +47,7 @@ import {
   getActivityStats,
   getPanelRecords,
   getPanelRecordDetails,
+  exportPanelMonitoringReport,
   exportPanelRecords,
   exportDefenseSchedule,
   updatePanelStatus,
@@ -105,6 +107,7 @@ router.use(checkAuth(["program head"]));
 router.get("/panels", checkPermission("view_research"), getPanelMembers);
 router.get("/panels/monitoring", checkPermission("view_research"), getPanelMonitoring);
 router.get("/panels/:id/details", checkPermission("view_research"), getPanelDetails);
+router.post("/panels/monitoring/export", checkPermission("export_activity"), exportPanelMonitoringReport);
 router.get("/panelists", checkPermission("manage_panels"), getAvailablePanelists);
 router.post("/panels", checkPermission("manage_panels"), createPanel);
 router.post("/panels/assign", checkPermission("assign_panels"), assignPanelMembers);
@@ -146,6 +149,7 @@ router.post("/forms", upload.single("file"), checkPermission("upload_documents")
 
 // Research records
 router.get("/research", checkPermission("view_research"), getResearchRecords);
+router.post("/research/export", checkPermission("export_activity"), exportResearchRecords);
 router.put("/research/:id/finalize", checkPermission("approve_research"), finalizeResearch);
 
 // Faculty adviser management

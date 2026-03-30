@@ -15,7 +15,13 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const BACKUP_DIR = path.join(__dirname, "..", "..", "backups");
-const MAX_BACKUPS = parseInt(process.env.MAX_BACKUPS || "30"); // Keep 30 days of backups
+const BACKUP_RETENTION_DAYS = parseInt(process.env.BACKUP_RETENTION_DAYS || process.env.MAX_BACKUPS || "30", 10);
+const BACKUP_RETENTION_MS = BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+const isManagedBackupEntry = (entryName) =>
+  entryName.startsWith("backup-metadata-") ||
+  entryName.startsWith("db-backup-") ||
+  entryName.startsWith("uploads-backup-");
 
 /**
  * Create backup directory if it doesn't exist
@@ -351,16 +357,18 @@ export const restoreDatabase = async (backupPath) => {
 };
 
 /**
- * Clean old backups (keep only MAX_BACKUPS)
+ * Clean old backups by retention age
  */
 export const cleanOldBackups = async () => {
   try {
     await ensureBackupDir();
     const entries = await fs.readdir(BACKUP_DIR);
-    
-    // Filter backup files and directories
+
+    const now = Date.now();
     const backups = [];
     for (const entry of entries) {
+      if (!isManagedBackupEntry(entry)) continue;
+
       const fullPath = path.join(BACKUP_DIR, entry);
       try {
         const stat = await fs.stat(fullPath);
@@ -374,30 +382,73 @@ export const cleanOldBackups = async () => {
       }
     }
 
-    // Sort by modification time (newest first)
-    backups.sort((a, b) => b.mtime - a.mtime);
+    const expiredBackups = backups.filter((backup) => {
+      const backupAgeMs = now - backup.mtime.getTime();
+      return backupAgeMs > BACKUP_RETENTION_MS;
+    });
 
-    // Remove backups beyond MAX_BACKUPS
-    if (backups.length > MAX_BACKUPS) {
-      const toDelete = backups.slice(MAX_BACKUPS);
-      for (const backup of toDelete) {
-        try {
-          const stat = await fs.stat(backup.path);
-          if (stat.isDirectory()) {
-            await fs.rm(backup.path, { recursive: true, force: true });
-          } else {
-            await fs.unlink(backup.path);
-          }
-          console.log(`Deleted old backup: ${backup.name}`);
-        } catch (error) {
-          console.error(`Error deleting backup ${backup.name}:`, error);
+    let deleted = 0;
+    const failed = [];
+
+    for (const backup of expiredBackups) {
+      try {
+        const stat = await fs.stat(backup.path);
+        if (stat.isDirectory()) {
+          await fs.rm(backup.path, { recursive: true, force: true });
+        } else {
+          await fs.unlink(backup.path);
         }
+        deleted += 1;
+        console.log(`Deleted expired backup: ${backup.name}`);
+      } catch (error) {
+        failed.push(backup.name);
+        console.error(`Error deleting backup ${backup.name}:`, error);
       }
     }
 
-    return { deleted: Math.max(0, backups.length - MAX_BACKUPS) };
+    return {
+      deleted,
+      failed,
+      retentionDays: BACKUP_RETENTION_DAYS,
+    };
   } catch (error) {
     console.error("Error cleaning old backups:", error);
+    throw error;
+  }
+};
+
+/**
+ * Delete all managed backups
+ */
+export const deleteAllBackups = async () => {
+  try {
+    await ensureBackupDir();
+    const entries = await fs.readdir(BACKUP_DIR);
+
+    const targets = entries.filter(isManagedBackupEntry);
+    let deleted = 0;
+    const failed = [];
+
+    for (const entry of targets) {
+      const fullPath = path.join(BACKUP_DIR, entry);
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.isDirectory()) {
+          await fs.rm(fullPath, { recursive: true, force: true });
+        } else {
+          await fs.unlink(fullPath);
+        }
+        deleted += 1;
+        console.log(`Deleted backup: ${entry}`);
+      } catch (error) {
+        failed.push(entry);
+        console.error(`Error deleting backup ${entry}:`, error);
+      }
+    }
+
+    return { deleted, failed };
+  } catch (error) {
+    console.error("Error deleting all backups:", error);
     throw error;
   }
 };

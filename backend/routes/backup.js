@@ -6,7 +6,9 @@ import {
   createUploadsBackupOnly,
   getBackups,
   restoreFromBackup,
-  cleanBackups
+  cleanBackups,
+  deleteAllManagedBackups,
+  downloadBackup
 } from "../controllers/backupController.js";
 
 const router = express.Router();
@@ -27,11 +29,17 @@ router.post("/uploads", createUploadsBackupOnly);
 // List all backups
 router.get("/list", getBackups);
 
+// Download a full backup package by metadata file name
+router.get("/download", downloadBackup);
+
 // Restore from backup
 router.post("/restore", restoreFromBackup);
 
 // Clean old backups
 router.post("/clean", cleanBackups);
+
+// Delete all managed backups
+router.post("/clean-all", deleteAllManagedBackups);
 
 export default router;
 

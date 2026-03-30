@@ -29,15 +29,17 @@ import {
   FaTrashAlt,
   FaCloud,
 } from "react-icons/fa";
-import { showSuccess, showError, showConfirm, showWarning } from "../../utils/sweetAlert";
-import Swal from "sweetalert2";
+import { showSuccess, showDriveExportSuccess, showError, showConfirm, showWarning } from "../../utils/sweetAlert";
 import Settings from "../Settings";
 
-const API_BASE_URL =
+const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  (import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, "") : "") ||
   (typeof window !== "undefined" && window.location.origin.includes("localhost:5173")
     ? "http://localhost:5000"
-    : "");
+    : "")
+).replace(/\/$/, "");
 
 const buildApiUrl = (path) => `${API_BASE_URL}${path}`;
 
@@ -717,16 +719,61 @@ const Admin = ({ user, setUser }) => {
 
     setCreatingBackup(true);
     try {
-      await axios.post(buildApiUrl("/api/backup/create"), {}, {
+      const createRes = await axios.post(buildApiUrl("/api/backup/create"), {}, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
-      await showSuccess("Success", "Backup created successfully!");
+
+      const metadataPath = createRes.data?.backup?.metadataPath || "";
+      const metadataFile = metadataPath.split(/[/\\]/).pop();
+
+      let downloadFailed = false;
+      if (metadataFile) {
+        try {
+          await downloadFullBackupByMetadataFile(metadataFile);
+        } catch (downloadError) {
+          downloadFailed = true;
+          console.error("Backup created but auto-download failed:", downloadError);
+        }
+      }
+
+      if (downloadFailed) {
+        await showWarning(
+          "Backup Created",
+          "Backup was created successfully, but auto-download failed. Use the Download button in the backups list."
+        );
+      } else {
+        await showSuccess("Success", "Backup created and downloaded successfully!");
+      }
       await fetchBackups();
     } catch (error) {
       showError("Error", error.response?.data?.message || "Failed to create backup");
     } finally {
       setCreatingBackup(false);
     }
+  };
+
+  const downloadFullBackupByMetadataFile = async (metadataFile) => {
+    const downloadRes = await axios.get(
+      buildApiUrl(`/api/backup/download?metadataFile=${encodeURIComponent(metadataFile)}`),
+      {
+        headers: { Authorization: `Bearer ${getToken()}` },
+        responseType: "blob",
+      }
+    );
+
+    const contentDisposition = downloadRes.headers?.["content-disposition"] || "";
+    const fileNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+    const downloadFileName = fileNameMatch?.[1] || `full-backup-${Date.now()}.zip`;
+
+    const blob = new Blob([downloadRes.data], { type: "application/zip" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", downloadFileName);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   };
 
   const handleCleanBackups = async () => {
@@ -742,10 +789,52 @@ const Admin = ({ user, setUser }) => {
       const res = await axios.post(buildApiUrl("/api/backup/clean"), {}, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
-      await showSuccess("Success", `Cleaned ${res.data.deleted || 0} old backup(s)`);
+      const deletedCount = Number(res.data.deleted || 0);
+      const retentionDays = Number(res.data.retentionDays || 30);
+      const failedCount = Array.isArray(res.data.failed) ? res.data.failed.length : 0;
+
+      if (deletedCount > 0) {
+        await showSuccess("Success", `Deleted ${deletedCount} backup(s) older than ${retentionDays} days.`);
+      } else if (failedCount > 0) {
+        await showWarning("Cleanup Incomplete", "Old backups were found, but they could not be deleted. Please check server file permissions.");
+      } else {
+        await showWarning("No Old Backups", `No backups older than ${retentionDays} days were found.`);
+      }
+
       await fetchBackups();
     } catch (error) {
       showError("Error", error.response?.data?.message || "Failed to clean backups");
+    }
+  };
+
+  const handleDeleteAllBackups = async () => {
+    const result = await showConfirm(
+      "Delete All Backups",
+      "This will permanently delete all managed backup files and folders. Continue?",
+      "Delete All",
+      "Cancel"
+    );
+    if (!result.isConfirmed) return;
+
+    try {
+      const res = await axios.post(buildApiUrl("/api/backup/clean-all"), {}, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+
+      const deletedCount = Number(res.data.deleted || 0);
+      const failedCount = Array.isArray(res.data.failed) ? res.data.failed.length : 0;
+
+      if (deletedCount > 0) {
+        await showSuccess("Success", `Deleted ${deletedCount} backup(s).`);
+      } else if (failedCount > 0) {
+        await showWarning("Delete Incomplete", "Backups were found, but some could not be deleted. Please check file permissions.");
+      } else {
+        await showWarning("No Backups Found", "No managed backups were found to delete.");
+      }
+
+      await fetchBackups();
+    } catch (error) {
+      showError("Error", error.response?.data?.message || "Failed to delete all backups");
     }
   };
 
@@ -843,28 +932,14 @@ const Admin = ({ user, setUser }) => {
         );
 
         // Build success message with link if available
-        if (response.data.driveFile?.webViewLink) {
-          await Swal.fire({
-            title: "Success!",
-            html: `
-              <p>${response.data.message || "Activity logs exported as PDF and saved to your Google Drive Reports folder!"}</p>
-              <p style="margin-top: 15px;">
-                <a href="${response.data.driveFile.webViewLink}" target="_blank" 
-                   style="color: #1A73E8; text-decoration: underline; font-weight: bold;">
-                  Click here to open the file in Google Drive
-                </a>
-              </p>
-            `,
-            icon: "success",
-            confirmButtonColor: "#7C1D23",
-            confirmButtonText: "OK",
-          });
-        } else {
-          await showSuccess(
-            "Success",
-            response.data.message || "Activity logs exported as PDF and saved to your Google Drive Reports folder!"
-          );
-        }
+        await showDriveExportSuccess(
+          "Success",
+          response.data.message || "Activity logs exported as PDF and saved to your Google Drive Reports folder!",
+          {
+            driveFileLink: response.data.driveFile?.webViewLink,
+            driveFolderLink: response.data.driveFolderLink,
+          }
+        );
         
         // Refresh drive status
         await fetchDriveStatus();
@@ -2182,6 +2257,13 @@ const Admin = ({ user, setUser }) => {
                   <span>Clean Old Backups</span>
                 </button>
                 <button
+                  onClick={handleDeleteAllBackups}
+                  className="px-4 py-2 border border-red-300 text-red-700 rounded-lg font-medium hover:bg-red-50 flex items-center space-x-2"
+                >
+                  <FaTrashAlt />
+                  <span>Delete All Backups</span>
+                </button>
+                <button
                   onClick={fetchBackups}
                   disabled={backupLoading}
                   className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 flex items-center space-x-2"
@@ -2221,6 +2303,9 @@ const Admin = ({ user, setUser }) => {
                         <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
                           Details
                         </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                          Actions
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-100">
@@ -2255,6 +2340,25 @@ const Admin = ({ user, setUser }) => {
                               </div>
                             ) : (
                               backup.name
+                            )}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                            {backup.type === "metadata" ? (
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await downloadFullBackupByMetadataFile(backup.name);
+                                    await showSuccess("Downloaded", "Backup downloaded successfully.");
+                                  } catch (error) {
+                                    showError("Error", error.response?.data?.message || "Failed to download backup");
+                                  }
+                                }}
+                                className="px-3 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition-colors"
+                              >
+                                Download
+                              </button>
+                            ) : (
+                              <span className="text-xs text-gray-400">—</span>
                             )}
                           </td>
                         </tr>

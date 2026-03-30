@@ -71,15 +71,19 @@ export const updateThesisStatus = async (req, res) => {
       return res.status(404).json({ message: "Research not found" });
     }
 
-    // Block progress update if research was rejected by panel or already finalized
-    if (oldResearch.status === "rejected" && progress !== undefined && progress !== oldResearch.progress) {
+    const hasStatusChange = status !== undefined && status !== oldResearch.status;
+    const hasStageChange = stage !== undefined && stage !== oldResearch.stage;
+    const hasProgressChange = progress !== undefined && progress !== oldResearch.progress;
+
+    // Block adviser updates if research was rejected by panel or already finalized
+    if (oldResearch.status === "rejected" && (hasStatusChange || hasStageChange || hasProgressChange)) {
       return res.status(403).json({ 
-        message: "Progress cannot be updated. This research has been rejected by the panel." 
+        message: "Research has been rejected by the panel and can no longer be updated by the adviser." 
       });
     }
-    if (oldResearch.finalizedDate && progress !== undefined && progress !== oldResearch.progress) {
+    if (oldResearch.finalizedDate && (hasStatusChange || hasStageChange || hasProgressChange)) {
       return res.status(403).json({ 
-        message: "Progress cannot be updated. This research has already been finalized." 
+        message: "Research has already been finalized and can no longer be updated by the adviser." 
       });
     }
     
@@ -1124,6 +1128,7 @@ export const getConsultationSchedules = async (req, res) => {
 export const createConsultationSlot = async (req, res) => {
   try {
     const { title, description, datetime, duration, location, research, syncToCalendar, consultationType } = req.body;
+    const normalizedLocation = consultationType === "online" ? "Online" : location?.trim();
 
     console.log('[CREATE CONSULTATION] Received request:', {
       title,
@@ -1142,7 +1147,7 @@ export const createConsultationSlot = async (req, res) => {
       return res.status(400).json({ message: "Title is required" });
     }
     
-    if (!location || !location.trim()) {
+    if (!normalizedLocation) {
       return res.status(400).json({ message: "Location is required" });
     }
     
@@ -1241,7 +1246,7 @@ export const createConsultationSlot = async (req, res) => {
       description: description || "Available for consultation",
       datetime: startTime,
       duration: duration || 60,
-      location: consultationType === "online" ? "Online" : location,
+      location: normalizedLocation,
       consultationType: consultationType || "face-to-face",
       participants: [
         {
@@ -2106,7 +2111,7 @@ export const getMyStudents = async (req, res) => {
     })
     .populate("students", "name email")
     .populate("adviser", "name email")
-    .select("title students status stage progress updatedAt");
+    .select("title students status stage progress finalizedDate updatedAt");
     
     console.log("Found research assignments:", research);
     res.json(research);
@@ -2122,7 +2127,7 @@ export const getDetailedStudentInfo = async (req, res) => {
     const research = await Research.find({ adviser: req.user.id })
       .populate("students", "name email")
       .populate("adviser", "name email ")
-      .select("title description status stage progress startDate endDate createdAt updatedAt");
+      .select("title description status stage progress finalizedDate startDate endDate createdAt updatedAt");
     
     // Group research by student for better organization
     const studentDetails = research.reduce((acc, curr) => {
@@ -2145,6 +2150,7 @@ export const getDetailedStudentInfo = async (req, res) => {
           status: curr.status,
           stage: curr.stage,
           progress: curr.progress,
+          finalizedDate: curr.finalizedDate,
           startDate: curr.startDate,
           endDate: curr.endDate,
           createdAt: curr.createdAt,

@@ -19,6 +19,45 @@ export const showSuccess = (title, text = "") => {
 };
 
 /**
+ * Show a Drive export success alert with direct links
+ */
+export const showDriveExportSuccess = (
+  title,
+  text = "",
+  { driveFileLink = "", driveFolderLink = "" } = {}
+) => {
+  if (!driveFileLink && !driveFolderLink) {
+    return showSuccess(title, text);
+  }
+
+  return Swal.fire({
+    title,
+    html: `
+      <p>${text || "Export completed successfully."}</p>
+      ${driveFileLink ? `
+        <p style="margin-top: 16px;">
+          <a href="${driveFileLink}" target="_blank" rel="noopener noreferrer"
+             style="color: #1A73E8; text-decoration: underline; font-weight: bold;">
+            Open exported file in Google Drive
+          </a>
+        </p>
+      ` : ""}
+      ${driveFolderLink ? `
+        <p style="margin-top: 10px;">
+          <a href="${driveFolderLink}" target="_blank" rel="noopener noreferrer"
+             style="color: #1A73E8; text-decoration: underline; font-weight: bold;">
+            Open destination folder in Google Drive
+          </a>
+        </p>
+      ` : ""}
+    `,
+    icon: "success",
+    confirmButtonColor: PRIMARY_COLOR,
+    confirmButtonText: "OK",
+  });
+};
+
+/**
  * Show an error alert
  */
 export const showError = (title, text = "") => {
@@ -94,6 +133,7 @@ export const showDangerConfirm = (title, text = "", confirmText = "Yes, proceed"
 
 export default {
   showSuccess,
+  showDriveExportSuccess,
   showError,
   showWarning,
   showInfo,

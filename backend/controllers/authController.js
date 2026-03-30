@@ -223,6 +223,16 @@ export const register = async (req, res) => {
         });
     } catch (err) {
         console.error(err);
+        
+        if (err.code === 11000) {
+            if (err.keyPattern?.studentId) {
+                return res.status(400).json({ message: 'An account with this Student ID already exists.' });
+            }
+            if (err.keyPattern?.email) {
+                return res.status(400).json({ message: 'An account with this email already exists.' });
+            }
+        }
+        
         res.status(500).json({ message: 'Registration failed' });
     }
 };

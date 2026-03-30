@@ -4,9 +4,18 @@ import {
   createUploadsBackup,
   restoreDatabase,
   listBackups,
-  cleanOldBackups
+  cleanOldBackups,
+  deleteAllBackups
 } from "../utils/backup.js";
 import Activity from "../models/Activity.js";
+import fs from "fs/promises";
+import path from "path";
+import archiver from "archiver";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const BACKUP_DIR = path.join(__dirname, "..", "..", "backups");
 
 /**
  * Create full backup (database + uploads)
@@ -188,7 +197,9 @@ export const cleanBackups = async (req, res) => {
     res.json({
       success: true,
       message: "Old backups cleaned successfully",
-      deleted: cleanResult.deleted
+      deleted: cleanResult.deleted,
+      failed: cleanResult.failed || [],
+      retentionDays: cleanResult.retentionDays
     });
   } catch (error) {
     console.error("Clean backups error:", error);
@@ -197,6 +208,131 @@ export const cleanBackups = async (req, res) => {
       message: "Failed to clean old backups",
       error: error.message
     });
+  }
+};
+
+/**
+ * Delete all managed backups
+ */
+export const deleteAllManagedBackups = async (req, res) => {
+  try {
+    const result = await deleteAllBackups();
+
+    await Activity.create({
+      user: req.user.id,
+      action: "delete",
+      entityType: "settings",
+      entityName: "Delete All Backups",
+      description: `Deleted all backups: ${result.deleted} deleted`,
+      metadata: { deleted: result.deleted, failed: result.failed || [] }
+    }).catch(err => console.error("Error logging delete-all backup activity:", err));
+
+    res.json({
+      success: true,
+      message: "All backups deleted successfully",
+      deleted: result.deleted,
+      failed: result.failed || []
+    });
+  } catch (error) {
+    console.error("Delete all backups error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete all backups",
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Download a full backup package by metadata file name
+ */
+export const downloadBackup = async (req, res) => {
+  try {
+    const { metadataFile } = req.query;
+
+    if (!metadataFile) {
+      return res.status(400).json({
+        success: false,
+        message: "metadataFile is required"
+      });
+    }
+
+    const safeMetadataFile = path.basename(metadataFile);
+    if (!safeMetadataFile.startsWith("backup-metadata-") || !safeMetadataFile.endsWith(".json")) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid metadata file"
+      });
+    }
+
+    const metadataPath = path.join(BACKUP_DIR, safeMetadataFile);
+    const metadataContent = await fs.readFile(metadataPath, "utf-8");
+    const metadata = JSON.parse(metadataContent);
+
+    const timestamp = safeMetadataFile
+      .replace("backup-metadata-", "")
+      .replace(".json", "");
+    const downloadName = `full-backup-${timestamp}.zip`;
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${downloadName}\"`);
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+
+    archive.on("error", (err) => {
+      console.error("Backup download archive error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, message: "Failed to build backup archive" });
+      } else {
+        res.end();
+      }
+    });
+
+    archive.pipe(res);
+
+    // Always include metadata file
+    archive.file(metadataPath, { name: `metadata/${safeMetadataFile}` });
+
+    // Include database backup path if present
+    const databasePath = metadata?.backups?.database?.path;
+    if (databasePath) {
+      try {
+        const dbStat = await fs.stat(databasePath);
+        if (dbStat.isDirectory()) {
+          archive.directory(databasePath, `database/${path.basename(databasePath)}`);
+        } else {
+          archive.file(databasePath, { name: `database/${path.basename(databasePath)}` });
+        }
+      } catch (error) {
+        console.warn("Database backup path missing during download:", databasePath);
+      }
+    }
+
+    // Include uploads backup path if present
+    const uploadsPath = metadata?.backups?.uploads?.path;
+    if (uploadsPath) {
+      try {
+        const uploadsStat = await fs.stat(uploadsPath);
+        if (uploadsStat.isDirectory()) {
+          archive.directory(uploadsPath, `uploads/${path.basename(uploadsPath)}`);
+        } else {
+          archive.file(uploadsPath, { name: `uploads/${path.basename(uploadsPath)}` });
+        }
+      } catch (error) {
+        console.warn("Uploads backup path missing during download:", uploadsPath);
+      }
+    }
+
+    await archive.finalize();
+  } catch (error) {
+    console.error("Download backup error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: "Failed to download backup",
+        error: error.message
+      });
+    }
   }
 };
 

@@ -207,6 +207,10 @@ const formatFieldValue = (row, field, selectedFields = []) => {
       return row.students?.length
         ? row.students.map((student) => student.name || "N/A").join(", ")
         : "N/A";
+    case "studentEmail":
+      return row.students?.length
+        ? row.students.map((student) => student.email || student.studentId || "N/A").join(", ")
+        : "N/A";
     case "adviser":
       // Always show only name (email can be in separate field if needed)
       return row.adviser
@@ -241,6 +245,22 @@ const formatFieldValue = (row, field, selectedFields = []) => {
     default:
       return row[field] ?? "N/A";
   }
+};
+
+const PDF_COLUMN_WEIGHTS = {
+  title: 18,
+  students: 18,
+  studentEmail: 18,
+  adviser: 14,
+  status: 10,
+  stage: 12,
+  progress: 8,
+  academicYear: 10,
+  panelMembers: 16,
+  submissionsPerStage: 16,
+  totalSubmissions: 9,
+  createdAt: 10,
+  updatedAt: 12,
 };
 
 // Generate digital signature for export
@@ -307,15 +327,14 @@ const addPageNumbers = (doc, digitalSignature) => {
 };
 
 // Generate HTML template for PDF export
-const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSummary }) => {
-  // Generate digital signature
+const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSummary, useLandscape = false }) => {
+  const normalizedFields = sanitizeSelectedFields(selectedFields);
   const digitalSignature = generateDigitalSignature({
     recordCount: rows.length,
-    fields: selectedFields,
+    fields: normalizedFields,
     generatedBy
   });
 
-  // Find and convert logo to base64
   let logoBase64 = "";
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
@@ -338,7 +357,6 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
         const logoExt = path.extname(logoPath).toLowerCase();
         const mimeType = logoExt === '.png' ? 'image/png' : 'image/jpeg';
         logoBase64 = `data:${mimeType};base64,${logoBuffer.toString('base64')}`;
-        console.log('Logo found and converted to base64:', logoPath);
         break;
       } catch (logoError) {
         console.log('Error reading logo:', logoError.message);
@@ -346,34 +364,33 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
     }
   }
 
-  // Generate table rows HTML
-  const tableRows = rows.map((row) => {
-    const title = (row.title || "Untitled Research").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-    const students = formatFieldValue(row, "students", selectedFields) || "N/A";
-    const adviser = formatFieldValue(row, "adviser", selectedFields) || "N/A";
-    const status = formatFieldValue(row, "status", selectedFields) || "N/A";
-    const stage = formatFieldValue(row, "stage", selectedFields) || "N/A";
-    const progress = formatFieldValue(row, "progress", selectedFields) || "0%";
-    const created = formatFieldValue(row, "createdAt", selectedFields) || "N/A";
-    const updated = formatFieldValue(row, "updatedAt", selectedFields) || "N/A";
-    const submissions = formatFieldValue(row, "totalSubmissions", selectedFields) || "0";
+  const totalWeight = normalizedFields.reduce((sum, field) => sum + (PDF_COLUMN_WEIGHTS[field] || 10), 0);
+  const fontSize = normalizedFields.length >= 11 ? 7.5 : normalizedFields.length >= 9 ? 8 : 9;
 
-    return `
-      <tr>
-        <td>${escapeHtml(title)}</td>
-        <td class="students-cell">${escapeHtml(students)}</td>
-        <td class="adviser-cell">${escapeHtml(adviser)}</td>
-        <td class="status-cell">${escapeHtml(status)}</td>
-        <td>${escapeHtml(stage)}</td>
-        <td>${escapeHtml(progress)}</td>
-        <td>${escapeHtml(created)}</td>
-        <td>${escapeHtml(updated)}</td>
-        <td>${escapeHtml(submissions)}</td>
-      </tr>
-    `;
+  const tableColumns = normalizedFields.map((field) => {
+    const percent = ((PDF_COLUMN_WEIGHTS[field] || 10) / totalWeight) * 100;
+    return `<col style="width: ${percent.toFixed(2)}%">`;
   }).join("");
 
-  const html = `
+  const tableHeaders = normalizedFields.map((field) => (
+    `<th>${escapeHtml(FIELD_LABELS[field] || field)}</th>`
+  )).join("");
+
+  const tableRows = rows.map((row) => {
+    const cells = normalizedFields.map((field) => {
+      const value = formatFieldValue(row, field, normalizedFields) || "N/A";
+      const cellClass = ["students", "studentEmail", "adviser", "panelMembers", "submissionsPerStage"].includes(field)
+        ? "wrap-cell"
+        : field === "status"
+          ? "status-cell"
+          : "";
+      return `<td class="${cellClass}">${escapeHtml(value)}</td>`;
+    }).join("");
+
+    return `<tr>${cells}</tr>`;
+  }).join("");
+
+  return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -388,13 +405,13 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
     }
 
     @page {
-      size: A4;
-      margin: 1.5cm;
+      size: A4 ${useLandscape ? "landscape" : "portrait"};
+      margin: ${useLandscape ? "1cm" : "1.5cm"};
     }
 
     body {
       font-family: 'Helvetica', 'Arial', sans-serif;
-      font-size: 10px;
+      font-size: ${fontSize}px;
       color: #111827;
       line-height: 1.4;
       background: #ffffff;
@@ -472,22 +489,8 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
       table-layout: fixed;
       border-collapse: collapse;
       margin-bottom: 20px;
-      font-size: 9px;
+      font-size: ${fontSize}px;
     }
-
-    .report colgroup col {
-      width: 0;
-    }
-
-    .report col.c1 { width: 20%; }
-    .report col.c2 { width: 22%; }
-    .report col.c3 { width: 15%; }
-    .report col.c4 { width: 10%; }
-    .report col.c5 { width: 12%; }
-    .report col.c6 { width: 10%; }
-    .report col.c7 { width: 12%; }
-    .report col.c8 { width: 12%; }
-    .report col.c9 { width: 12%; }
 
     .report thead {
       display: table-header-group;
@@ -499,11 +502,12 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
       padding: 8px 6px;
       text-align: left;
       font-weight: bold;
-      font-size: 9px;
+      font-size: ${Math.max(fontSize - 0.5, 7)}px;
       border: 1px solid #5a1519;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      word-break: break-word;
     }
 
     .report tbody tr {
@@ -525,7 +529,7 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
       vertical-align: top;
     }
 
-    .report tbody td.adviser-cell,
+    .report tbody td.wrap-cell,
     .report tbody td.status-cell {
       white-space: normal;
       word-wrap: break-word;
@@ -588,28 +592,10 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
 
   <table class="report">
     <colgroup>
-      <col class="c1">
-      <col class="c2">
-      <col class="c3">
-      <col class="c4">
-      <col class="c5">
-      <col class="c6">
-      <col class="c7">
-      <col class="c8">
-      <col class="c9">
+      ${tableColumns}
     </colgroup>
     <thead>
-      <tr>
-        <th>Research Title</th>
-        <th>Students</th>
-        <th>Adviser</th>
-        <th>Status</th>
-        <th>Stage</th>
-        <th>Progress %</th>
-        <th>Created</th>
-        <th>Updated</th>
-        <th>Submissions</th>
-      </tr>
+      <tr>${tableHeaders}</tr>
     </thead>
     <tbody>
       ${tableRows}
@@ -624,8 +610,6 @@ const generatePdfHtmlTemplate = (rows, { selectedFields, generatedBy, filtersSum
 </body>
 </html>
   `;
-
-  return html;
 };
 
 // Helper function to escape HTML
@@ -642,8 +626,15 @@ const escapeHtml = (text) => {
 // Generate PDF buffer using HTML template
 // This function works with Puppeteer, html-pdf, pdf-lib, or any HTML-to-PDF tool
 const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSummary }) => {
-  // Generate HTML template
-  const html = generatePdfHtmlTemplate(rows, { selectedFields, generatedBy, filtersSummary });
+  const normalizedFields = sanitizeSelectedFields(selectedFields);
+  const useLandscape = normalizedFields.length > 8;
+  const pageMargin = useLandscape ? "1cm" : "1.5cm";
+  const html = generatePdfHtmlTemplate(rows, {
+    selectedFields: normalizedFields,
+    generatedBy,
+    filtersSummary,
+    useLandscape,
+  });
 
   // Try to use Puppeteer if available
   try {
@@ -657,11 +648,13 @@ const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSum
       await page.setContent(html, { waitUntil: "networkidle0" });
       const pdfBuffer = await page.pdf({
         format: "A4",
+        landscape: useLandscape,
+        preferCSSPageSize: true,
         margin: {
-          top: "1.5cm",
-          right: "1.5cm",
-          bottom: "1.5cm",
-          left: "1.5cm"
+          top: pageMargin,
+          right: pageMargin,
+          bottom: pageMargin,
+          left: pageMargin
         },
         printBackground: true,
         displayHeaderFooter: false
@@ -680,11 +673,12 @@ const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSum
       return new Promise((resolve, reject) => {
         pdf.default.create(html, {
           format: "A4",
+          orientation: useLandscape ? "landscape" : "portrait",
           border: {
-            top: "1.5cm",
-            right: "1.5cm",
-            bottom: "1.5cm",
-            left: "1.5cm"
+            top: pageMargin,
+            right: pageMargin,
+            bottom: pageMargin,
+            left: pageMargin
           },
           type: "pdf",
           quality: "75"
@@ -701,7 +695,12 @@ const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSum
   // Fallback to PDFKit (original implementation) if no HTML-to-PDF tool is available
   console.log("No HTML-to-PDF tool available, using PDFKit fallback");
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 50, bufferPages: true });
+    const doc = new PDFDocument({
+      size: "A4",
+      layout: useLandscape ? "landscape" : "portrait",
+      margin: useLandscape ? 36 : 50,
+      bufferPages: true,
+    });
     const chunks = [];
 
     doc.on("data", (chunk) => chunks.push(chunk));
@@ -711,7 +710,7 @@ const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSum
     // Generate digital signature
     const digitalSignature = generateDigitalSignature({
       recordCount: rows.length,
-      fields: selectedFields,
+      fields: normalizedFields,
       generatedBy
     });
 
@@ -809,7 +808,7 @@ const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSum
 
       const detailsY = doc.y;
       // Count fields excluding title, but include studentEmail if selected
-      const fieldCount = selectedFields.filter(f => f !== "title").length;
+      const fieldCount = normalizedFields.filter((field) => field !== "title").length;
       const detailsHeight = fieldCount * 15 + 10;
       
       doc.rect(doc.page.margins.left, detailsY, doc.page.width - (doc.page.margins.left + doc.page.margins.right), detailsHeight)
@@ -820,18 +819,18 @@ const generatePdfBuffer = async (rows, { selectedFields, generatedBy, filtersSum
          .stroke();
 
       doc.y = detailsY + 8;
-      selectedFields
+      normalizedFields
         .filter((field) => field !== "title" && field !== "studentEmail")
         .forEach((field) => {
           const label = FIELD_LABELS[field];
-          const value = formatFieldValue(row, field, selectedFields);
+          const value = formatFieldValue(row, field, normalizedFields);
           doc.fontSize(9).fillColor("#6B7280").text(`${label}:`, { continued: true });
           doc.fontSize(9).fillColor("#111827").text(` ${value || "N/A"}`);
           doc.moveDown(0.4);
         });
       
       // Handle studentEmail field separately if selected
-      if (selectedFields.includes('studentEmail')) {
+      if (normalizedFields.includes('studentEmail')) {
         const studentEmails = row.students?.length
           ? row.students.map((student) => student.email || student.studentId || "N/A").join(", ")
           : "N/A";
@@ -1950,6 +1949,8 @@ export const exportResearchRecords = async (req, res) => {
       recordCount: rows.length,
       fields: selectedFields,
       driveFile,
+      driveFolderId: reportsFolderId || null,
+      driveFolderLink: reportsFolderId ? `https://drive.google.com/drive/folders/${reportsFolderId}` : null,
       filters: filtersSummary || null,
       exportId: exportRecord?._id || null
     });
@@ -3803,6 +3804,8 @@ export const exportDefenseSchedule = async (req, res) => {
       format: "xlsx",
       recordCount: schedules.length,
       driveFile,
+      driveFolderId: reportsFolderId || null,
+      driveFolderLink: reportsFolderId ? `https://drive.google.com/drive/folders/${reportsFolderId}` : null,
       exportId: exportRecord?._id || null
     });
   } catch (error) {

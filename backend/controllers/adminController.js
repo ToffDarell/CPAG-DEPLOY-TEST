@@ -1452,13 +1452,12 @@ export const exportActivityLogsPDF = async (req, res) => {
       }
 
       const reportsFolderId =
-        process.env.GOOGLE_DRIVE_REPORTS_FOLDER_ID ||
-        process.env.GOOGLE_DRIVE_ADMIN_REPORTS_FOLDER_ID ||
+        process.env.GOOGLE_DRIVE_ADMIN_FOLDER_ID ||
         null;
 
       if (!reportsFolderId) {
         return res.status(500).json({ 
-          message: "Reports folder ID is not configured. Please set GOOGLE_DRIVE_REPORTS_FOLDER_ID." 
+          message: "Folder ID is not configured. Please set GOOGLE_DRIVE_REPORTS_FOLDER_ID, GOOGLE_DRIVE_ADMIN_REPORTS_FOLDER_ID, or GOOGLE_DRIVE_ADMIN_FOLDER_ID." 
         });
       }
 
@@ -1551,6 +1550,8 @@ export const exportActivityLogsPDF = async (req, res) => {
           name: driveFile.name,
           webViewLink: driveFile.webViewLink,
         },
+        driveFolderId: reportsFolderId,
+        driveFolderLink: `https://drive.google.com/drive/folders/${reportsFolderId}`,
       });
     }
 
@@ -1580,4 +1581,3 @@ export const exportActivityLogsPDF = async (req, res) => {
     });
   }
 };
-

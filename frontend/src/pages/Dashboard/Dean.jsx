@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import Settings from '../Settings';
 import DriveUploader from '../../components/DriveUploader';
-import { showSuccess, showError, showWarning, showConfirm, showDangerConfirm } from '../../utils/sweetAlert';
+import { showSuccess, showDriveExportSuccess, showError, showWarning, showConfirm, showDangerConfirm } from '../../utils/sweetAlert';
 import { checkPermission } from '../../utils/permissionChecker';
 import { renderAsync } from 'docx-preview';
 
@@ -1226,6 +1226,24 @@ const isOverdue = (research) => {
 // Enhanced research card component
 const ResearchMonitoringCard = ({ research, onViewDetails }) => {
   const overdue = isOverdue(research);
+  const statusColors = {
+    approved: 'bg-green-100 text-green-700',
+    pending: 'bg-yellow-100 text-yellow-700',
+    'in-progress': 'bg-blue-100 text-blue-700',
+    'for-revision': 'bg-orange-100 text-orange-700',
+    completed: 'bg-purple-100 text-purple-700',
+    archived: 'bg-slate-100 text-slate-700',
+    delayed: 'bg-red-100 text-red-700',
+  };
+  const statusLabels = {
+    approved: 'Approved',
+    pending: 'Pending',
+    'in-progress': 'In Progress',
+    'for-revision': 'For Revision',
+    completed: 'Completed',
+    archived: 'Archived',
+    delayed: 'Delayed',
+  };
   
   return (
     <div className={`border rounded-lg p-4 transition-all duration-200 hover:shadow-md ${
@@ -1254,13 +1272,9 @@ const ResearchMonitoringCard = ({ research, onViewDetails }) => {
           
           <div className="mt-2 flex items-center gap-4">
             <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-              research.status === 'completed' ? 'bg-green-100 text-green-700' :
-              research.status === 'in-progress' ? 'bg-blue-100 text-blue-700' :
-              research.status === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-              research.status === 'delayed' ? 'bg-red-100 text-red-700' :
-              'bg-gray-100 text-gray-700'
+              statusColors[research.status] || 'bg-gray-100 text-gray-700'
             }`}>
-              {research.status}
+              {statusLabels[research.status] || research.status}
             </span>
             <span className="text-xs text-gray-500">
               Last Updated: {new Date(research.updatedAt).toLocaleDateString()}
@@ -1639,9 +1653,10 @@ const ResearchRecordDetailsModal = ({ research, isOpen, onClose, onDownload }) =
       'approved': 'bg-green-100 text-green-700',
       'pending': 'bg-yellow-100 text-yellow-700',
       'under review': 'bg-blue-100 text-blue-700',
+      'for-revision': 'bg-orange-100 text-orange-700',
       'rejected': 'bg-red-100 text-red-700',
       'completed': 'bg-purple-100 text-purple-700',
-      'archived': 'bg-gray-100 text-gray-700'
+      'archived': 'bg-slate-100 text-slate-700'
     };
     return colors[status?.toLowerCase()] || 'bg-gray-100 text-gray-700';
   };
@@ -2200,30 +2215,6 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
     }
   };
 
-  const handleBulkShare = async () => {
-    if (selectedResearchIds.length === 0) {
-      showWarning('No Selection', 'Please select at least one research record to share.');
-      return;
-    }
-
-    setBulkOperating(true);
-    try {
-      const token = localStorage.getItem('token');
-      const res = await axios.post(
-        '/api/dean/research/bulk-share',
-        { researchIds: selectedResearchIds },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      await showSuccess('Success', res.data.message || `${res.data.count} research record(s) shared successfully.`);
-      setSelectedResearchIds([]);
-      if (onRefresh) onRefresh();
-    } catch (error) {
-      showError('Error', error.response?.data?.message || 'Failed to share research records.');
-    } finally {
-      setBulkOperating(false);
-    }
-  };
-
   // Export handler
   const handleExport = async () => {
     if (!driveConnected) {
@@ -2262,9 +2253,13 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
           res.data.message || `Research records exported but failed to upload to Google Drive.`
         );
       } else {
-        await showSuccess(
+        await showDriveExportSuccess(
           'Export Successful',
-          res.data.message || `Research records exported as ${exportFormat.toUpperCase()} and saved to your Google Drive Reports folder.`
+          res.data.message || `Research records exported as ${exportFormat.toUpperCase()} and saved to your Google Drive Reports folder.`,
+          {
+            driveFileLink: res.data.driveFile?.webViewLink,
+            driveFolderLink: res.data.driveFolderLink,
+          }
         );
       }
       setShowExportModal(false);
@@ -2346,11 +2341,34 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
       'approved': 'bg-green-100 text-green-700 border-green-300',
       'pending': 'bg-yellow-100 text-yellow-700 border-yellow-300',
       'under review': 'bg-blue-100 text-blue-700 border-blue-300',
+      'for-revision': 'bg-orange-100 text-orange-700 border-orange-300',
       'rejected': 'bg-red-100 text-red-700 border-red-300',
       'completed': 'bg-purple-100 text-purple-700 border-purple-300',
-      'archived': 'bg-gray-100 text-gray-700 border-gray-300'
+      'archived': 'bg-slate-100 text-slate-700 border-slate-300'
     };
     return colors[status?.toLowerCase()] || 'bg-gray-100 text-gray-700 border-gray-300';
+  };
+
+  const getShareBadges = (research) => {
+    if (!research?.sharedWithDean) {
+      return [];
+    }
+
+    const badges = [
+      {
+        text: 'Shared by Program Head',
+        className: 'bg-blue-100 text-blue-700',
+      },
+    ];
+
+    if (!['approved', 'rejected', 'archived'].includes(research.status)) {
+      badges.push({
+        text: 'Awaiting your decision',
+        className: 'bg-indigo-50 text-indigo-700',
+      });
+    }
+
+    return badges;
   };
 
   return (
@@ -2551,13 +2569,6 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
             >
               {bulkOperating ? 'Processing...' : 'Approve Selected'}
             </button>
-            <button
-              onClick={handleBulkShare}
-              disabled={bulkOperating}
-              className="px-4 py-2 bg-white text-[#7C1D23] rounded-md hover:bg-gray-100 transition-colors disabled:opacity-50 text-sm font-medium"
-            >
-              {bulkOperating ? 'Processing...' : 'Share Selected'}
-            </button>
           </div>
         </div>
       )}
@@ -2614,7 +2625,9 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                      {paginatedResearch.map((item) => (
+                      {paginatedResearch.map((item) => {
+                        const shareBadges = getShareBadges(item);
+                        return (
                   <tr key={item._id} className={`hover:bg-gray-50 transition-colors ${selectedResearchIds.includes(item._id) ? 'bg-blue-50' : ''}`}>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <input
@@ -2635,6 +2648,18 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
                       <div className="text-xs text-gray-500">
                         Student: {item.students?.[0]?.name || 'N/A'}
                       </div>
+                      {shareBadges.length > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          {shareBadges.map((badge) => (
+                            <span
+                              key={badge.text}
+                              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.className}`}
+                            >
+                              {badge.text}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="px-6 py-4">
                       <div className="text-sm text-gray-900">{item.adviser?.name || 'N/A'}</div>
@@ -2667,7 +2692,8 @@ const ResearchRecords = ({ stats, research, onRefresh, driveStatus, sheetsStatus
                       </div>
                     </td>
                   </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -3100,9 +3126,10 @@ const ArchiveProjects = ({ research, onRefresh }) => {
       'under review': 'bg-blue-100 text-blue-700 border-blue-300',
       'in-progress': 'bg-blue-100 text-blue-700 border-blue-300',
       'in progress': 'bg-blue-100 text-blue-700 border-blue-300',
+      'for-revision': 'bg-orange-100 text-orange-700 border-orange-300',
       'rejected': 'bg-red-100 text-red-700 border-red-300',
       'completed': 'bg-purple-100 text-purple-700 border-purple-300',
-      'archived': 'bg-gray-100 text-gray-700 border-gray-300'
+      'archived': 'bg-slate-100 text-slate-700 border-slate-300'
     };
     return colors[status?.toLowerCase()] || 'bg-gray-100 text-gray-700 border-gray-300';
   };
@@ -3439,9 +3466,13 @@ const MonitoringEvaluation = ({ research, driveStatus }) => {
           res.data.message || `Defense schedule exported but failed to upload to Google Drive.`
         );
       } else {
-        await showSuccess(
+        await showDriveExportSuccess(
           'Export Successful',
-          res.data.message || `Defense schedule exported as Excel and saved to your Google Drive Reports folder.`
+          res.data.message || `Defense schedule exported as Excel and saved to your Google Drive Reports folder.`,
+          {
+            driveFileLink: res.data.driveFile?.webViewLink,
+            driveFolderLink: res.data.driveFolderLink,
+          }
         );
       }
     } catch (error) {
@@ -3568,9 +3599,10 @@ const PanelAssignment = ({ research, faculty }) => {
       'approved': 'bg-green-100 text-green-700',
       'pending': 'bg-yellow-100 text-yellow-700',
       'in-progress': 'bg-blue-100 text-blue-700',
+      'for-revision': 'bg-orange-100 text-orange-700',
       'rejected': 'bg-red-100 text-red-700',
       'completed': 'bg-purple-100 text-purple-700',
-      'archived': 'bg-gray-100 text-gray-700'
+      'archived': 'bg-slate-100 text-slate-700'
     };
     return colors[status?.toLowerCase()] || 'bg-gray-100 text-gray-700';
   };

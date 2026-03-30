@@ -467,7 +467,7 @@ const FacultyAdviserDashboard = ({ setUser, user }) => {
       await showSuccess('Success', 'Thesis status updated successfully!');
     } catch (error) {
       console.error('Error updating thesis status:', error);
-      showError('Error', 'Error updating thesis status');
+      showError('Error', error?.response?.data?.message || 'Error updating thesis status');
     } finally {
       setLoading(false);
     }
@@ -2956,12 +2956,24 @@ const ConsultationSchedule = ({ schedules, onRefresh }) => {
 
     try {
       const token = localStorage.getItem('token');
+      const normalizedLocation = formData.consultationType === "online"
+        ? "Online"
+        : formData.location.trim();
+
+      if (formData.consultationType !== "online" && !normalizedLocation) {
+        setErrorMessage("Please enter a location for the consultation");
+        setLoading(false);
+        return;
+      }
+
       // Send datetime in datetime-local format (YYYY-MM-DDTHH:mm)
       // The backend will treat this as Manila time (UTC+8) and convert to UTC for storage
       // Do NOT convert to ISO here to avoid browser timezone issues
       
       const response = await axios.post('/api/faculty/schedules', {
         ...formData,
+        title: formData.title.trim(),
+        location: normalizedLocation,
         datetime: formData.datetime // Send as-is in datetime-local format
       }, {
         headers: { Authorization: `Bearer ${token}` }
@@ -3790,7 +3802,18 @@ const ConsultationSchedule = ({ schedules, onRefresh }) => {
                 </label>
                 <select
                   value={formData.consultationType}
-                  onChange={(e) => setFormData({...formData, consultationType: e.target.value})}
+                  onChange={(e) => {
+                    const newType = e.target.value;
+                    setFormData({
+                      ...formData,
+                      consultationType: newType,
+                      location: newType === "online"
+                        ? "Online"
+                        : formData.location === "Online"
+                          ? ""
+                          : formData.location
+                    });
+                  }}
                   className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
                   required
                 >
@@ -4113,6 +4136,16 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
   };
 
   const handleUpdateStatus = async () => {
+    if (selectedStudent?.status === 'rejected') {
+      showWarning('Locked', 'This research has been rejected by the panel and can no longer be updated by the adviser.');
+      return;
+    }
+
+    if (selectedStudent?.finalizedDate) {
+      showWarning('Locked', 'This research has already been finalized and can no longer be updated by the adviser.');
+      return;
+    }
+
     try {
       await onUpdateStatus(selectedStudent._id, selectedStatus, selectedStage, selectedProgress);
       setShowConfirmation(true);
@@ -4133,6 +4166,34 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
     { value: "completed", label: "Completed", color: "green" },
   ];
 
+  const getResearchStatusBadgeClass = (status) => {
+    const colors = {
+      pending: 'bg-yellow-100 text-yellow-700',
+      'in-progress': 'bg-blue-100 text-blue-700',
+      'for-revision': 'bg-orange-100 text-orange-700',
+      approved: 'bg-green-100 text-green-700',
+      completed: 'bg-emerald-100 text-emerald-700',
+      archived: 'bg-slate-100 text-slate-700',
+      rejected: 'bg-red-100 text-red-700',
+    };
+
+    return colors[status] || 'bg-gray-100 text-gray-700';
+  };
+
+  const formatResearchStatusLabel = (status) => {
+    const labels = {
+      pending: 'Pending',
+      'in-progress': 'In Progress',
+      'for-revision': 'For Revision',
+      approved: 'Approved',
+      completed: 'Completed',
+      archived: 'Archived',
+      rejected: 'Rejected',
+    };
+
+    return labels[status] || status;
+  };
+
   const stageOptions = [
     { value: "proposal", label: "Proposal" },
     { value: "chapter1", label: "Chapter 1" },
@@ -4143,6 +4204,10 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
   ];
 
   if (detailedView && selectedStudent) {
+    const isRejectedResearch = selectedStudent.status === 'rejected';
+    const isFinalizedResearch = Boolean(selectedStudent.finalizedDate);
+    const isLockedResearch = isRejectedResearch || isFinalizedResearch;
+
     return (
       // Match Dean / Export PDF-Excel overlay for View & Update Status modal
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6">
@@ -4195,14 +4260,8 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
               <div className="space-y-2">
                   <p className="text-gray-700">
                   <span className="font-medium">Status:</span>{" "}
-                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                    selectedStudent.status === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-                    selectedStudent.status === 'in-progress' ? 'bg-blue-100 text-blue-700' :
-                    selectedStudent.status === 'for-revision' ? 'bg-orange-100 text-orange-700' :
-                    selectedStudent.status === 'completed' ? 'bg-green-100 text-green-700' :
-                    'bg-gray-100 text-gray-700'
-                    }`}>
-                      {selectedStudent.status}
+                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${getResearchStatusBadgeClass(selectedStudent.status)}`}>
+                      {formatResearchStatusLabel(selectedStudent.status)}
                     </span>
                   </p>
                   <p className="text-gray-700">
@@ -4220,6 +4279,22 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
             {/* Status Update Form */}
             <div className="p-4 bg-white rounded-lg border-2 border-[#7C1D23]">
               <h4 className="text-md font-semibold text-gray-800 mb-4">Update Research Status</h4>
+
+              {isRejectedResearch && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                  <p className="text-sm font-medium text-red-700">
+                    Adviser updates are locked because this research has been rejected by the panel.
+                  </p>
+                </div>
+              )}
+
+              {isFinalizedResearch && (
+                <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-sm font-medium text-gray-700">
+                    Adviser updates are locked because this research has already been finalized by the Program Head.
+                  </p>
+                </div>
+              )}
               
               <div className="space-y-4">
                 {/* Status Dropdown */}
@@ -4230,7 +4305,8 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
                   <select
                     value={selectedStatus}
                     onChange={(e) => setSelectedStatus(e.target.value)}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                    disabled={isLockedResearch}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
                   >
                     {statusOptions.map((option) => (
                       <option key={option.value} value={option.value}>
@@ -4248,7 +4324,8 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
                   <select
                     value={selectedStage}
                     onChange={(e) => setSelectedStage(e.target.value)}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent"
+                    disabled={isLockedResearch}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-[#7C1D23] focus:border-transparent disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
                   >
                     {stageOptions.map((option) => (
                       <option key={option.value} value={option.value}>
@@ -4263,7 +4340,7 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Progress: {selectedProgress}%
                   </label>
-                  {selectedStudent?.status === 'rejected' ? (
+                  {isRejectedResearch ? (
                     <div className="w-full p-3 bg-red-50 border border-red-200 rounded-lg">
                       <p className="text-red-600 text-xs font-medium">Progress locked — research was rejected by the panel.</p>
                       <div className="mt-2 w-full bg-gray-200 rounded-full h-2">
@@ -4271,11 +4348,11 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
                       </div>
                       <p className="text-xs text-gray-500 mt-1">{selectedProgress}%</p>
                     </div>
-                  ) : selectedStudent?.finalizedDate ? (
+                  ) : isFinalizedResearch ? (
                     <div className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg">
                       <p className="text-gray-500 text-xs font-medium">Progress locked — research has been finalized.</p>
                       <div className="mt-2 w-full bg-gray-200 rounded-full h-2">
-                        <div className="bg-purple-400 h-2 rounded-full" style={{ width: `${selectedProgress}%` }}></div>
+                        <div className="bg-gray-400 h-2 rounded-full" style={{ width: `${selectedProgress}%` }}></div>
                       </div>
                       <p className="text-xs text-gray-500 mt-1">{selectedProgress}%</p>
                     </div>
@@ -4347,13 +4424,23 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
               </button>
               <button
                 onClick={handleUpdateStatus}
-                disabled={loading}
+                disabled={loading || isLockedResearch}
                 className="flex items-center px-6 py-2 bg-[#7C1D23] text-white rounded-md hover:bg-[#5a1519] transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? (
                   <>
                     <FaClock className="mr-2 text-sm animate-spin" />
                     Updating...
+                  </>
+                ) : isRejectedResearch ? (
+                  <>
+                    <FaTimesCircle className="mr-2 text-sm" />
+                    Rejected
+                  </>
+                ) : isFinalizedResearch ? (
+                  <>
+                    <FaTimesCircle className="mr-2 text-sm" />
+                    Finalized
                   </>
                 ) : (
                   <>
@@ -4402,14 +4489,8 @@ const StudentList = ({ students, onUpdateStatus, loading }) => {
                       ))}
                     </div>
                     <div className="mt-3 flex items-center space-x-3">
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        research.status === 'pending' ? 'bg-yellow-100 text-yellow-700' :
-                        research.status === 'in-progress' ? 'bg-blue-100 text-blue-700' :
-                        research.status === 'for-revision' ? 'bg-orange-100 text-orange-700' :
-                        research.status === 'completed' ? 'bg-green-100 text-green-700' :
-                        'bg-gray-100 text-gray-700'
-                      }`}>
-                        {research.status === 'for-revision' ? 'For Revision' : research.status}
+                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${getResearchStatusBadgeClass(research.status)}`}>
+                        {formatResearchStatusLabel(research.status)}
                       </span>
                       <span className="text-sm text-gray-500">
                         Stage: {research.stage}
