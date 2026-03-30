@@ -1,10 +1,14 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import axios from 'axios'
 import './index.css'
 import App from './App.jsx'
 import { GoogleOAuthProvider } from '@react-oauth/google'
+import { configureAxiosBaseUrl } from './utils/api.js'
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID 
+
+configureAxiosBaseUrl(axios);
 
 // Check if CLIENT_ID is configured
 if (!CLIENT_ID) {

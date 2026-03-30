@@ -7,6 +7,7 @@ import MySchedule from "../../components/MyScheduleComponent";
 import DriveUploader from "../../components/DriveUploader";
 import { showSuccess, showError, showWarning, showDangerConfirm, showConfirm } from "../../utils/sweetAlert";
 import { checkPermission } from "../../utils/permissionChecker";
+import { buildDirectApiUrl } from "../../utils/api";
 import Settings from "../Settings";
 
 // Reusable Pagination Component
@@ -501,7 +502,7 @@ const GraduateDashboard = ({ setUser, user }) => {
           // If proxy returns 404, try direct backend URL
           if (proxyError.response?.status === 404) {
             console.warn('Proxy returned 404, trying direct backend URL...');
-            const directEndpoint = 'http://localhost:5000/api/student/chapter-from-drive';
+            const directEndpoint = buildDirectApiUrl('/api/student/chapter-from-drive');
             console.log('Attempting upload via direct URL to:', directEndpoint);
             try {
               response = await axios.post(directEndpoint, {
@@ -522,7 +523,7 @@ const GraduateDashboard = ({ setUser, user }) => {
               if (directError.response?.status === 404) {
                 throw new Error('The chapter upload endpoint was not found. Please ensure the backend server is running and has been restarted to load the new route.');
               } else if (directError.code === 'ECONNREFUSED') {
-                throw new Error('Cannot connect to backend server. Please ensure the backend is running on http://localhost:5000');
+                throw new Error('Cannot connect to the configured backend server. Please check your API base URL and backend deployment.');
               } else {
                 throw directError;
               }
@@ -2198,7 +2199,7 @@ const ComplianceForms = ({ myResearch, onFormUpload }) => {
           // If proxy returns 404, try direct backend URL
           if (proxyError.response?.status === 404) {
             console.warn('Proxy returned 404, trying direct backend URL...');
-            endpoint = 'http://localhost:5000/api/student/compliance-form-from-drive';
+            endpoint = buildDirectApiUrl('/api/student/compliance-form-from-drive');
             console.log('Attempting upload via direct URL to:', endpoint);
             response = await axios.post(endpoint, {
               driveFileId: selectedFile.driveFileId,
@@ -3981,4 +3982,3 @@ const DocumentsView = () => {
 };
 
 export default GraduateDashboard;
-

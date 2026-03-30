@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { showError } from '../utils/sweetAlert';
+import { API_BASE_URL } from '../utils/api';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
@@ -22,7 +23,7 @@ function loadScript(src) {
 }
 
 export default function DriveUploader({
-  apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:5000',
+  apiBase = API_BASE_URL,
   onUploaded,
   onFilePicked, // New callback that receives file info + access token
   defaultType = 'other',
@@ -32,6 +33,9 @@ export default function DriveUploader({
   buttonTextColor,
   skipBackendSave = false, // If true, skip saving to DriveUpload collection
 }) {
+  const resolvedApiBase = (apiBase || '').replace(/\/$/, '');
+  const buildUploaderApiUrl = (path) =>
+    `${resolvedApiBase}${path.startsWith('/') ? path : `/${path}`}`;
   const clientId = import.meta.env.VITE_GOOGLE_DRIVE_CLIENT_ID;
   const apiKey = import.meta.env.VITE_GOOGLE_PICKER_API_KEY;
   const [pickerReady, setPickerReady] = useState(false);
@@ -168,7 +172,7 @@ export default function DriveUploader({
     // First, try to get token from backend (if user connected Drive in Settings)
     // This ensures we use the exact same account that was connected
     try {
-      const response = await fetch(`${apiBase}/api/google-drive/access-token`, {
+      const response = await fetch(buildUploaderApiUrl('/api/google-drive/access-token'), {
         headers: headers,
       });
       
@@ -194,7 +198,7 @@ export default function DriveUploader({
     let userEmail = accountHint;
     
     try {
-      const statusResponse = await fetch(`${apiBase}/api/google-drive/status`, {
+      const statusResponse = await fetch(buildUploaderApiUrl('/api/google-drive/status'), {
         headers: headers,
       });
       
@@ -325,7 +329,7 @@ export default function DriveUploader({
                 size: doc.sizeBytes,
                 type: defaultType,
               };
-              const res = await fetch(`${apiBase}/api/google-drive/save-picker`, {
+              const res = await fetch(buildUploaderApiUrl('/api/google-drive/save-picker'), {
                 method: 'POST',
                 headers,
                 body: JSON.stringify(payload),
@@ -361,7 +365,7 @@ export default function DriveUploader({
         form.append('file', file);
         form.append('type', defaultType);
         const token = localStorage.getItem('token');
-        const res = await fetch(`${apiBase}/api/google-drive/upload`, {
+        const res = await fetch(buildUploaderApiUrl('/api/google-drive/upload'), {
           method: 'POST',
           headers: token ? { Authorization: `Bearer ${token}` } : {},
           body: form,

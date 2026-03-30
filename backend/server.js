@@ -30,6 +30,13 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const PORT = process.env.PORT || 5000;
 
 const app = express();
+const defaultAllowedOrigins = ["http://localhost:5173", "http://localhost:3000"];
+const configuredOrigins = [process.env.FRONTEND_URL, process.env.CORS_ORIGINS]
+  .filter(Boolean)
+  .flatMap((value) => value.split(","))
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...configuredOrigins])];
 
 const ensureStudentDeletePermission = async () => {
   try {
@@ -55,11 +62,19 @@ const ensureStudentDeletePermission = async () => {
   }
 };
 
-// Enable CORS for all routes
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
-  credentials: true
-}));
+// Enable CORS for local development and configured frontend domains.
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`Origin ${origin} is not allowed by CORS.`));
+    },
+    credentials: true,
+  })
+);
 
 // Security headers (must be before routes)
 app.use(securityHeaders);

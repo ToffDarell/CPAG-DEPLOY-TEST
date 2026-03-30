@@ -8,14 +8,6 @@ import { showSuccess, showDriveExportSuccess, showError, showWarning, showConfir
 import { checkPermission } from '../../utils/permissionChecker';
 import { renderAsync } from 'docx-preview';
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (typeof window !== 'undefined' && window.location.origin.includes('localhost:5173')
-    ? 'http://localhost:5000'
-    : '');
-
-const buildApiUrl = (path) => `${API_BASE_URL}${path}`;
-
 // Reusable Pagination Component
 const Pagination = ({ 
   currentPage, 

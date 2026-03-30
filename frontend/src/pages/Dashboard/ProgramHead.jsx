@@ -10,6 +10,7 @@ import 'react-big-calendar/lib/css/react-big-calendar.css';
 import Settings from "../Settings";
 import DriveUploader from "../../components/DriveUploader";
 import { renderAsync } from 'docx-preview';
+import { buildApiUrl, buildDirectApiUrl } from "../../utils/api";
 
 const localizer = momentLocalizer(moment);
 
@@ -3807,7 +3808,7 @@ const ProcessMonitoring = () => {
         </div>
         </div>
                         <a
-                          href={`/api/programhead/panels/${panelDetails.panel._id}/documents/${doc._id}/download`}
+                          href={buildApiUrl(`/api/programhead/panels/${panelDetails.panel._id}/documents/${doc._id}/download`)}
                           download
                           className="text-blue-600 hover:text-blue-700 text-sm"
                         >
@@ -5561,8 +5562,7 @@ const ResearchRecords = () => {
         await sendFinalizeRequest(finalizeEndpoint);
       } catch (error) {
         if (error.response?.status === 404) {
-          const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:5000';
-          const directEndpoint = `${apiBase}${finalizeEndpoint}`;
+          const directEndpoint = buildDirectApiUrl(finalizeEndpoint);
           console.warn('[Finalize Research] Proxy returned 404. Retrying via direct backend URL:', directEndpoint);
           await sendFinalizeRequest(directEndpoint);
         } else {

@@ -31,17 +31,7 @@ import {
 } from "react-icons/fa";
 import { showSuccess, showDriveExportSuccess, showError, showConfirm, showWarning } from "../../utils/sweetAlert";
 import Settings from "../Settings";
-
-const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  import.meta.env.VITE_API_BASE ||
-  (import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, "") : "") ||
-  (typeof window !== "undefined" && window.location.origin.includes("localhost:5173")
-    ? "http://localhost:5000"
-    : "")
-).replace(/\/$/, "");
-
-const buildApiUrl = (path) => `${API_BASE_URL}${path}`;
+import { buildApiUrl } from "../../utils/api";
 
 const ACTIVITY_ACTIONS = [
   "upload",
